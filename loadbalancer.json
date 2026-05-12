@@ -1,0 +1,52 @@
+{
+  "loadbalancer": {
+    "port": "8080",
+    "read_timeout_ms": 5000,
+    "write_timeout_ms": 10000,
+    "algorithm": "prequal"
+  },
+  "prequal": {
+    "selection_choices": 2,
+    "qrif": 0.84,
+    "probe_interval_ms": 1000,
+    "probe_timeout_ms": 2000,
+    "health_check_path": "/health"
+  },
+  "servers": [
+    {
+      "id": "server1",
+      "address": "server1:80",
+      "port": "80",
+      "cpu_load": 60,
+      "cpus": 1.0
+    },
+    {
+      "id": "server2",
+      "address": "server2:80",
+      "port": "80",
+      "cpu_load": 60,
+      "cpus": 1.0
+    },
+    {
+      "id": "server3",
+      "address": "server3:80",
+      "port": "80",
+      "cpu_load": 0,
+      "cpus": 1.0
+    },
+    {
+      "id": "server4",
+      "address": "server4:80",
+      "port": "80",
+      "cpu_load": 0,
+      "cpus": 1.0
+    }
+  ],
+  "monitoring": {
+    "prometheus_port": "9090",
+    "grafana_port": "3001",
+    "grafana_user": "admin",
+    "grafana_password": "admin",
+    "scrape_interval": "15s"
+  }
+}

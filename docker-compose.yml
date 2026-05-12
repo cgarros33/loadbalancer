@@ -1,3 +1,6 @@
+# Auto-generated from loadbalancer.json — do not edit manually.
+# Regenerate with: go run generate-compose.go
+
 services:
   loadbalancer-prequal:
     build: .
@@ -6,15 +9,15 @@ services:
       - "8080:8080"
     networks:
       - loadbalancer-net
+    volumes:
+      - ./loadbalancer.json:/app/loadbalancer.json:ro
     environment:
-      - BACKEND_SERVER1=server1
-      - BACKEND_SERVER2=server2
-      - BACKEND_SERVER3=server3
       - LB_ALGORITHM=prequal
     depends_on:
       - server1
       - server2
       - server3
+      - server4
 
   loadbalancer-rr:
     build: .
@@ -23,15 +26,15 @@ services:
       - "8081:8080"
     networks:
       - loadbalancer-net
+    volumes:
+      - ./loadbalancer.json:/app/loadbalancer.json:ro
     environment:
-      - BACKEND_SERVER1=server1
-      - BACKEND_SERVER2=server2
-      - BACKEND_SERVER3=server3
       - LB_ALGORITHM=roundrobin
     depends_on:
       - server1
       - server2
       - server3
+      - server4
 
   server1:
     build: ./backend
@@ -66,6 +69,17 @@ services:
       - CPU_LOAD=0
     cpus: 1.0
 
+  server4:
+    build: ./backend
+    container_name: server4
+    networks:
+      - loadbalancer-net
+    environment:
+      - SERVER_ID=server4
+      - PORT=80
+      - CPU_LOAD=0
+    cpus: 1.0
+
   prometheus:
     image: prom/prometheus
     ports:
@@ -80,8 +94,8 @@ services:
     ports:
       - "3001:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
     volumes:
       - ./config/grafana/provisioning:/etc/grafana/provisioning
       - ./config/grafana/dashboards:/var/lib/grafana/dashboards

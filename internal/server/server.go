@@ -21,10 +21,12 @@ type Server struct {
 
 func NewServer(cfg *config.Config, logger *slog.Logger) *Server {
 	lb := loadbalancer.NewLoadBalancer(&loadbalancer.Config{
-		ProbeInterval:    cfg.ProbeInterval,
-		ProbeTimeout:     cfg.ProbeTimeout,
-		HealthCheckPath:  cfg.HealthCheckPath,
-		SelectionChoices: cfg.SelectionChoices,
+		ProbeInterval:    cfg.ProbeInterval(),
+		ProbeTimeout:     cfg.ProbeTimeout(),
+		HealthCheckPath:  cfg.Prequal.HealthCheckPath,
+		SelectionChoices: cfg.Prequal.SelectionChoices,
+		Algorithm:        loadbalancer.Algorithm(cfg.LoadBalancer.Algorithm),
+		QRIF:             cfg.Prequal.QRIF,
 	}, logger)
 
 	for _, serverCfg := range cfg.Servers {
@@ -42,10 +44,10 @@ func NewServer(cfg *config.Config, logger *slog.Logger) *Server {
 
 	return &Server{
 		httpServer: &http.Server{
-			Addr:         ":" + cfg.Port,
+			Addr:         ":" + cfg.LoadBalancer.Port,
 			Handler:      mux,
-			ReadTimeout:  cfg.ReadTimeout,
-			WriteTimeout: cfg.WriteTimeout,
+			ReadTimeout:  cfg.ReadTimeout(),
+			WriteTimeout: cfg.WriteTimeout(),
 		},
 		lb:     lb,
 		config: cfg,
@@ -54,7 +56,7 @@ func NewServer(cfg *config.Config, logger *slog.Logger) *Server {
 }
 
 func (s *Server) Start() error {
-	s.logger.Info("Starting server", slog.String("port", s.config.Port))
+	s.logger.Info("Starting server", slog.String("port", s.config.LoadBalancer.Port))
 
 	s.lb.StartProbing()
 
