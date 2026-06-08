@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -19,6 +20,24 @@ const (
 	LevelTrace = slog.Level(-8)
 	LevelFatal = slog.Level(12)
 )
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+	}
+	return def
+}
 
 func main() {
 	ctx := context.Background()
@@ -34,24 +53,23 @@ func main() {
 	}
 
 	config := &loadbalancer.Config{
-		ProbeInterval:    time.Second,
-		ProbeTimeout:     time.Second * 2,
-		HealthCheckPath:  "/health",
-		SelectionChoices: 2,
-		Algorithm:        loadbalancer.Algorithm(algo),
+		ProbeInterval:       time.Second,
+		ProbeTimeout:        time.Second * 2,
+		HealthCheckPath:     "/health",
+		SelectionChoices:    2,
+		Algorithm:           loadbalancer.Algorithm(algo),
+		QRIF:                envFloat("QRIF", 0.84),
+		ProbePoolSize:       envInt("PROBE_POOL_SIZE", 8),
+		ProbeRateMultiplier: envFloat("PROBE_RATE_MULTIPLIER", 3.0),
 	}
 
 	lb := loadbalancer.NewLoadBalancer(config, logger)
 
-	logger.Info("Load balancer configured", slog.String("algorithm", string(config.Algorithm)))
-
-	testServers := []string{
-		"server1:80",
-		"server2:80",
-		"server3:80",
-	}
-
-	for i, addr := range testServers {
+	for i := 1; ; i++ {
+		addr := os.Getenv(fmt.Sprintf("BACKEND_SERVER%d", i))
+		if addr == "" {
+			break
+		}
 		lb.AddServer(&loadbalancer.Server{
 			ID:        fmt.Sprintf("server-%d", i),
 			Address:   addr,
@@ -84,7 +102,14 @@ func main() {
 		}
 	}()
 
-	logger.Info("Starting server on port " + *port)
+	logger.Info("Load balancer starting",
+		slog.String("port", *port),
+		slog.String("algorithm", algo),
+		slog.Float64("qrif", config.QRIF),
+		slog.Int("probe_pool_size", config.ProbePoolSize),
+		slog.Float64("probe_rate_multiplier", config.ProbeRateMultiplier),
+	)
+
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		logger.Log(ctx, LevelFatal, "Server error")
 	}

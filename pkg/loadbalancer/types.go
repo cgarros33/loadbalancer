@@ -29,12 +29,14 @@ const (
 )
 
 type Config struct {
-	ProbeInterval    time.Duration
-	ProbeTimeout     time.Duration
-	HealthCheckPath  string
-	SelectionChoices int
-	Algorithm        Algorithm
-	QRIF             float64
+	ProbeInterval       time.Duration
+	ProbeTimeout        time.Duration
+	HealthCheckPath     string
+	SelectionChoices    int
+	Algorithm           Algorithm
+	QRIF                float64
+	ProbePoolSize       int
+	ProbeRateMultiplier float64
 }
 
 type Stats struct {
