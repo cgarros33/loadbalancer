@@ -7,14 +7,31 @@ services:
     networks:
       - loadbalancer-net
     environment:
-      - BACKEND_SERVER1=server1
-      - BACKEND_SERVER2=server2
-      - BACKEND_SERVER3=server3
+      - BACKEND_SERVER1=server1:80
+      - BACKEND_SERVER2=server2:80
+      - BACKEND_SERVER3=server3:80
+      - BACKEND_SERVER4=server4:80
+      - BACKEND_SERVER5=server5:80
+      - BACKEND_SERVER6=server6:80
+      - BACKEND_SERVER7=server7:80
+      - BACKEND_SERVER8=server8:80
+      - BACKEND_SERVER9=server9:80
+      - BACKEND_SERVER10=server10:80
       - LB_ALGORITHM=prequal
+      - QRIF=0.7
+      - PROBE_POOL_SIZE=8
+      - PROBE_RATE_MULTIPLIER=0.5
     depends_on:
       - server1
       - server2
       - server3
+      - server4
+      - server5
+      - server6
+      - server7
+      - server8
+      - server9
+      - server10
 
   loadbalancer-rr:
     build: .
@@ -24,14 +41,31 @@ services:
     networks:
       - loadbalancer-net
     environment:
-      - BACKEND_SERVER1=server1
-      - BACKEND_SERVER2=server2
-      - BACKEND_SERVER3=server3
+      - BACKEND_SERVER1=server1:80
+      - BACKEND_SERVER2=server2:80
+      - BACKEND_SERVER3=server3:80
+      - BACKEND_SERVER4=server4:80
+      - BACKEND_SERVER5=server5:80
+      - BACKEND_SERVER6=server6:80
+      - BACKEND_SERVER7=server7:80
+      - BACKEND_SERVER8=server8:80
+      - BACKEND_SERVER9=server9:80
+      - BACKEND_SERVER10=server10:80
       - LB_ALGORITHM=roundrobin
+      - QRIF=0.7
+      - PROBE_POOL_SIZE=8
+      - PROBE_RATE_MULTIPLIER=0.5
     depends_on:
       - server1
       - server2
       - server3
+      - server4
+      - server5
+      - server6
+      - server7
+      - server8
+      - server9
+      - server10
 
   server1:
     build: ./backend
@@ -41,7 +75,10 @@ services:
     environment:
       - SERVER_ID=server1
       - PORT=80
-      - CPU_LOAD=60
+      - ANTAGONIST_LOAD=80
+      - BASE_SERVICE_MS=50
+      - CAPACITY=10
+      - DEBUG=0
     cpus: 1.0
 
   server2:
@@ -52,7 +89,10 @@ services:
     environment:
       - SERVER_ID=server2
       - PORT=80
-      - CPU_LOAD=60
+      - ANTAGONIST_LOAD=80
+      - BASE_SERVICE_MS=50
+      - CAPACITY=10
+      - DEBUG=0
     cpus: 1.0
 
   server3:
@@ -63,7 +103,108 @@ services:
     environment:
       - SERVER_ID=server3
       - PORT=80
-      - CPU_LOAD=0
+      - ANTAGONIST_LOAD=80
+      - BASE_SERVICE_MS=50
+      - CAPACITY=10
+      - DEBUG=0
+    cpus: 1.0
+
+  server4:
+    build: ./backend
+    container_name: server4
+    networks:
+      - loadbalancer-net
+    environment:
+      - SERVER_ID=server4
+      - PORT=80
+      - ANTAGONIST_LOAD=10
+      - BASE_SERVICE_MS=50
+      - CAPACITY=10
+      - DEBUG=0
+    cpus: 1.0
+
+  server5:
+    build: ./backend
+    container_name: server5
+    networks:
+      - loadbalancer-net
+    environment:
+      - SERVER_ID=server5
+      - PORT=80
+      - ANTAGONIST_LOAD=10
+      - BASE_SERVICE_MS=50
+      - CAPACITY=10
+      - DEBUG=0
+    cpus: 1.0
+
+  server6:
+    build: ./backend
+    container_name: server6
+    networks:
+      - loadbalancer-net
+    environment:
+      - SERVER_ID=server6
+      - PORT=80
+      - ANTAGONIST_LOAD=10
+      - BASE_SERVICE_MS=50
+      - CAPACITY=10
+      - DEBUG=0
+    cpus: 1.0
+
+  server7:
+    build: ./backend
+    container_name: server7
+    networks:
+      - loadbalancer-net
+    environment:
+      - SERVER_ID=server7
+      - PORT=80
+      - ANTAGONIST_LOAD=10
+      - BASE_SERVICE_MS=50
+      - CAPACITY=10
+      - DEBUG=0
+    cpus: 1.0
+
+  server8:
+    build: ./backend
+    container_name: server8
+    networks:
+      - loadbalancer-net
+    environment:
+      - SERVER_ID=server8
+      - PORT=80
+      - ANTAGONIST_LOAD=10
+      - BASE_SERVICE_MS=50
+      - CAPACITY=10
+      - DEBUG=0
+    cpus: 1.0
+
+  server9:
+    build: ./backend
+    container_name: server9
+    networks:
+      - loadbalancer-net
+    environment:
+      - SERVER_ID=server9
+      - PORT=80
+      - ANTAGONIST_LOAD=10
+      - BASE_SERVICE_MS=50
+      - CAPACITY=10
+      - DEBUG=0
+    cpus: 1.0
+
+  server10:
+    build: ./backend
+    container_name: server10
+    networks:
+      - loadbalancer-net
+    environment:
+      - SERVER_ID=server10
+      - PORT=80
+      - ANTAGONIST_LOAD=10
+      - BASE_SERVICE_MS=50
+      - CAPACITY=10
+      - DEBUG=0
     cpus: 1.0
 
   prometheus:
