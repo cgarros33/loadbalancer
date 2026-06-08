@@ -1,0 +1,9 @@
+# One node per line — full SSH hostname as given by CloudLab.
+# First line is treated as the LB node when --separate-lb is set (default).
+# When --no-separate-lb, node0 runs both LB and one backend.
+#
+# Example (Utah xl170 cluster):
+node0.myexperiment.myproject.utah.cloudlab.us
+node1.myexperiment.myproject.utah.cloudlab.us
+node2.myexperiment.myproject.utah.cloudlab.us
+node3.myexperiment.myproject.utah.cloudlab.us
