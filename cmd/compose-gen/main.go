@@ -27,6 +27,10 @@ const composeTmpl = `services:
 {{- range $i := .BackendRange}}
       - server{{inc $i}}
 {{- end}}
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
   loadbalancer-rr:
     build: .
@@ -47,6 +51,10 @@ const composeTmpl = `services:
 {{- range $i := .BackendRange}}
       - server{{inc $i}}
 {{- end}}
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 {{range $i := .BackendRange}}
   server{{inc $i}}:
     build: ./backend
@@ -56,7 +64,8 @@ const composeTmpl = `services:
     environment:
       - SERVER_ID=server{{inc $i}}
       - PORT=80
-      - ANTAGONIST_LOAD={{index $.CPULoads $i}}
+      - ANTAGONIST_BIAS={{index $.AntagonistBias $i}}
+      - MEAN_DWELL_MS={{$.MeanDwellMS}}
       - BASE_SERVICE_MS={{$.BaseServiceMS}}
       - CAPACITY={{$.Capacity}}
       - DEBUG={{$.Debug}}
@@ -93,7 +102,8 @@ networks:
 
 type tmplData struct {
 	BackendRange        []int
-	CPULoads            []int // per-backend CPU_LOAD, len == len(BackendRange)
+	AntagonistBias      []float64 // per-backend ANTAGONIST_BIAS (p_up), len == len(BackendRange)
+	MeanDwellMS         int
 	BaseServiceMS       int
 	Capacity            int
 	CPUs                string
@@ -105,9 +115,10 @@ type tmplData struct {
 
 func main() {
 	n := flag.Int("n", 10, "number of backend servers")
-	cpuLoad := flag.Int("cpu-load", 50, "baseline CPU_LOAD for cold backends (0-100)")
-	hotFraction := flag.Float64("hot-fraction", 0.0, "fraction of backends that are hot (0.0-1.0)")
-	hotCPULoad := flag.Int("hot-cpu-load", 80, "CPU_LOAD for hot backends")
+	hotBias := flag.Float64("hot-bias", 0.65, "ANTAGONIST_BIAS (p_up) for hot-prone backends")
+	neutralBias := flag.Float64("neutral-bias", 0.5, "ANTAGONIST_BIAS (p_up) for neutral backends")
+	coldBias := flag.Float64("cold-bias", 0.3, "ANTAGONIST_BIAS (p_up) for cold-prone backends")
+	meanDwellMS := flag.Int("mean-dwell-ms", 2000, "MEAN_DWELL_MS for the antagonist random walk")
 	baseMS := flag.Int("base-service-ms", 5, "BASE_SERVICE_MS baseline latency per request")
 	capacity := flag.Int("capacity", 20, "CAPACITY per backend (processor-sharing capacity)")
 	cpus := flag.Float64("cpus", 1.0, "Docker CPU quota per backend container")
@@ -122,29 +133,35 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: -n must be >= 1")
 		os.Exit(1)
 	}
-	if *hotFraction < 0 || *hotFraction > 1 {
-		fmt.Fprintln(os.Stderr, "error: -hot-fraction must be between 0.0 and 1.0")
-		os.Exit(1)
-	}
 
 	backendRange := make([]int, *n)
 	for i := range backendRange {
 		backendRange[i] = i
 	}
 
-	nHot := int(float64(*n) * *hotFraction)
-	cpuLoads := make([]int, *n)
-	for i := range cpuLoads {
-		if i < nHot {
-			cpuLoads[i] = *hotCPULoad
-		} else {
-			cpuLoads[i] = *cpuLoad
+	// Split backends into three antagonist-propensity groups: hot-prone,
+	// neutral, cold-prone (roughly thirds). With the default biases
+	// (0.65/0.5/0.3) the per-backend stationary mean antagonist levels are
+	// ~66%/50%/~30%, averaging well under the 70% no-collapse threshold.
+	nHot := *n / 3
+	nCold := *n / 3
+	nNeutral := *n - nHot - nCold
+	biases := make([]float64, *n)
+	for i := range biases {
+		switch {
+		case i < nHot:
+			biases[i] = *hotBias
+		case i < nHot+nNeutral:
+			biases[i] = *neutralBias
+		default:
+			biases[i] = *coldBias
 		}
 	}
 
 	data := tmplData{
 		BackendRange:        backendRange,
-		CPULoads:            cpuLoads,
+		AntagonistBias:      biases,
+		MeanDwellMS:         *meanDwellMS,
 		BaseServiceMS:       *baseMS,
 		Capacity:            *capacity,
 		CPUs:                fmt.Sprintf("%.1f", *cpus),
@@ -182,8 +199,8 @@ func main() {
 	}
 
 	if *output != "-" {
-		fmt.Fprintf(os.Stderr, "generated %s: %d backends (%d hot @ %d%%, %d cold @ %d%%), base-service-ms=%d, capacity=%d\n",
-			*output, *n, nHot, *hotCPULoad, *n-nHot, *cpuLoad, *baseMS, *capacity)
+		fmt.Fprintf(os.Stderr, "generated %s: %d backends (%d hot-prone @ bias %.2f, %d neutral @ bias %.2f, %d cold-prone @ bias %.2f), mean-dwell-ms=%d, base-service-ms=%d, capacity=%d\n",
+			*output, *n, nHot, *hotBias, nNeutral, *neutralBias, nCold, *coldBias, *meanDwellMS, *baseMS, *capacity)
 	}
 
 }

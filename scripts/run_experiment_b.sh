@@ -33,6 +33,7 @@ echo ""
     --qrif             0.70    \
     --duration         30s     \
     --warmup           15s     \
+    --drain            5s      \
     --output           "$OUTPUT"
 
 echo ""

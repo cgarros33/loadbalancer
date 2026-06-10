@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"log"
 	"math/rand"
 	"net/http"
@@ -14,6 +15,80 @@ import (
 )
 
 var rif atomic.Int32
+
+// antagonistLevels are the discrete states of the antagonist random walk,
+// expressed as a percentage of this backend's CAPACITY consumed by
+// co-located jobs. The walk only steps between adjacent levels, with a
+// floor at 20% and a ceiling at 80% (no antagonist ever leaves the backend
+// completely idle, and none ever fully starves it).
+var antagonistLevels = []int{20, 35, 50, 65, 80}
+
+// neutralLevelIdx is the starting index (50%) and the index used for the
+// latency-tracker fallback before any real samples exist.
+const neutralLevelIdx = 2
+
+// dynamicAntagonist models "whatever we happen to encounter in the wild"
+// (the paper's description of antagonist traffic): a per-backend, time-
+// varying contention level that the load balancer never observes directly,
+// only through its effect on RIF and latency.
+type dynamicAntagonist struct {
+	idx atomic.Int32
+}
+
+func (d *dynamicAntagonist) level() int {
+	return antagonistLevels[d.idx.Load()]
+}
+
+// run advances the random walk forever, one step per dwell period. pUp is
+// the probability of stepping toward higher antagonist load at each
+// transition (heterogeneous across backends so some run hotter on average
+// than others, without any of them being statically pinned). dwell periods
+// are drawn from an exponential distribution with mean meanDwell: memoryless,
+// so the walk has no detectable periodicity, and short enough relative to the
+// 30s measurement window that many transitions occur per step.
+func (d *dynamicAntagonist) run(rng *rand.Rand, pUp float64, meanDwell time.Duration) {
+	idx := int32(neutralLevelIdx)
+	d.idx.Store(idx)
+	for {
+		dwell := time.Duration(rng.ExpFloat64() * float64(meanDwell))
+		time.Sleep(dwell)
+		if rng.Float64() < pUp {
+			if idx < int32(len(antagonistLevels)-1) {
+				idx++
+			}
+		} else {
+			if idx > 0 {
+				idx--
+			}
+		}
+		d.idx.Store(idx)
+	}
+}
+
+// computeEffective derives this backend's instantaneous effective capacity,
+// per-request service time, and queue depth from its current antagonist
+// level. The antagonist consumes antagonistPct% of CAPACITY, so requests run
+// on a proportionally smaller share of CPU and take longer — even below
+// saturation — exactly as shared-resource contention (cache, memory
+// bandwidth, context switches) would in practice.
+//
+//	effectiveServiceMS = BASE_MS × capacity / effectiveC
+//
+// preserves saturation throughput (= effectiveC × 1000 / BASE_MS) while
+// raising per-request latency and RIF as antagonist load rises. Queue depth
+// is 20× saturation throughput, giving generous backlog headroom before
+// requests are shed (shedding in practice happens via the loadgen's 5s
+// deadline / context cancellation, not queue depth).
+func computeEffective(capacity, baseServiceMS, antagonistPct int) (effectiveC int, effectiveServiceMS float64, queueDepth int) {
+	effectiveC = capacity - capacity*antagonistPct/100
+	if effectiveC < 1 {
+		effectiveC = 1
+	}
+	effectiveServiceMS = float64(baseServiceMS) * float64(capacity) / float64(effectiveC)
+	saturationQPS := effectiveC * 1000 / baseServiceMS
+	queueDepth = saturationQPS * 20
+	return
+}
 
 // rifBucket maps a RIF value to a log2 bucket index (0–9) for latency lookup.
 // bucket 0 = RIF 0, bucket k = RIF in [2^(k-1), 2^k − 1].
@@ -117,13 +192,6 @@ func main() {
 		serverID = "unknown"
 	}
 
-	antagonistLoad := 0
-	if v := os.Getenv("ANTAGONIST_LOAD"); v != "" {
-		if val, err := strconv.Atoi(v); err == nil {
-			antagonistLoad = val
-		}
-	}
-
 	baseServiceMS := 5
 	if v := os.Getenv("BASE_SERVICE_MS"); v != "" {
 		if val, err := strconv.Atoi(v); err == nil && val > 0 {
@@ -140,40 +208,27 @@ func main() {
 
 	debug := os.Getenv("DEBUG") == "1"
 
-	// The antagonist consumes antagonistLoad% of the server's CPU allocation,
-	// causing every request to run on a proportionally smaller share of CPU
-	// and therefore take longer — even below saturation. Shared resources
-	// (L3 cache, memory bandwidth, context switches) are not fully isolated,
-	// so hot backends genuinely respond slower per-request than cold ones
-	// regardless of queue depth.
-	//
-	// All capacity threads remain available (semaphore = capacity) but each
-	// progresses at reduced speed:
-	//
-	//   effectiveServiceMS = BASE_MS × capacity / effectiveC
-	//
-	// This preserves saturation throughput (= effectiveC × 1000 / BASE_MS)
-	// while correctly raising per-request latency and RIF on hot backends.
-	// Little's law: RIF = QPS × effectiveServiceMS, so hot backends naturally
-	// show higher RIF at the same incoming rate.
-	//
-	// Queue depth is capped at 5× saturation throughput, giving ~5 s of
-	// backlog before requests are shed — matching the paper's 5 s RPC deadline
-	// as the point at which further queuing yields only deadline-exceeded
-	// errors rather than useful capacity.
-
-	effectiveC := capacity - int(float64(capacity)*float64(antagonistLoad)/100.0)
-	if effectiveC < 1 {
-		effectiveC = 1
+	// ANTAGONIST_BIAS is p_up: the probability that the random walk steps
+	// toward a higher antagonist level at each transition. 0.5 is neutral
+	// (stationary mean ≈ 50%); >0.5 biases this backend hot-prone, <0.5
+	// cold-prone. Backends are nominally identical hardware — only this
+	// propensity differs, modelling heterogeneous "neighbours" per backend.
+	antagonistBias := 0.5
+	if v := os.Getenv("ANTAGONIST_BIAS"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 1 {
+			antagonistBias = f
+		}
 	}
 
-	effectiveServiceMS := float64(baseServiceMS) * float64(capacity) / float64(effectiveC)
-
-	saturationQPS := effectiveC * 1000 / baseServiceMS
-	queueDepth := saturationQPS * 20
-	if v := os.Getenv("QUEUE_DEPTH"); v != "" {
+	// MEAN_DWELL_MS is the mean time spent at each antagonist level before
+	// transitioning. Default 2s: long enough relative to a single request's
+	// service time that a request experiences consistent conditions
+	// end-to-end, short enough relative to the 30s measurement window that
+	// many transitions occur per step.
+	meanDwellMS := 2000
+	if v := os.Getenv("MEAN_DWELL_MS"); v != "" {
 		if val, err := strconv.Atoi(v); err == nil && val > 0 {
-			queueDepth = val
+			meanDwellMS = val
 		}
 	}
 
@@ -186,7 +241,7 @@ func main() {
 		}
 	}
 
-	sampleServiceMS := func() float64 {
+	sampleServiceMS := func(effectiveServiceMS float64) float64 {
 		if jitter == 0 {
 			return effectiveServiceMS
 		}
@@ -197,41 +252,88 @@ func main() {
 		return s
 	}
 
-	// Semaphore at capacity: all threads available, each running at reduced speed.
+	// Semaphore at capacity: all threads available, each running at reduced
+	// speed depending on the current antagonist level.
 	sem := make(chan struct{}, capacity)
 
-	// Tracker window of 2 s matches the probe pool's staleness horizon.
-	// Fallback = effectiveServiceMS ensures idle hot backends always report
-	// higher latency than cold ones, preventing routing oscillation.
-	tracker := newLatencyTracker(2*time.Second, int64(effectiveServiceMS))
+	// Tracker window: short enough to detect sudden load changes quickly,
+	// long enough to accumulate a stable median. Configurable via
+	// TRACKER_WINDOW_MS; defaults to 500ms.
+	trackerWindow := 500 * time.Millisecond
+	if v := os.Getenv("TRACKER_WINDOW_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			trackerWindow = time.Duration(ms) * time.Millisecond
+		}
+	}
+	_, neutralServiceMS, _ := computeEffective(capacity, baseServiceMS, antagonistLevels[neutralLevelIdx])
+	tracker := newLatencyTracker(trackerWindow, int64(neutralServiceMS))
 
-	log.Printf("server %s starting on :%s — capacity=%d antagonist=%d%% effective_c=%d effective_ms=%.0f sat_qps=%d queue_depth=%d jitter=%.1f",
-		serverID, port, capacity, antagonistLoad, effectiveC, effectiveServiceMS, saturationQPS, queueDepth, jitter)
+	// Seed this backend's antagonist random walk independently of every
+	// other backend (and across restarts) using its server ID + wall clock.
+	h := fnv.New64a()
+	h.Write([]byte(serverID))
+	seed := int64(h.Sum64()) ^ time.Now().UnixNano()
+	rng := rand.New(rand.NewSource(seed))
+
+	antagonist := &dynamicAntagonist{}
+	go antagonist.run(rng, antagonistBias, time.Duration(meanDwellMS)*time.Millisecond)
+
+	log.Printf("server %s starting on :%s — capacity=%d base_ms=%d antagonist_bias=%.2f mean_dwell_ms=%d jitter=%.1f",
+		serverID, port, capacity, baseServiceMS, antagonistBias, meanDwellMS, jitter)
+	for _, lvl := range antagonistLevels {
+		ec, ems, qd := computeEffective(capacity, baseServiceMS, lvl)
+		log.Printf("  antagonist=%d%% -> effective_c=%d effective_ms=%.0f queue_depth=%d", lvl, ec, ems, qd)
+	}
 
 	// serve processes one request and returns (http status, RIF at arrival).
-	serve := func(path string) (int, int32) {
+	// It respects r.Context() so that when the upstream client (the LB proxy)
+	// cancels the request (e.g. the loadgen's 5 s timeout fires), the goroutine
+	// releases its semaphore slot immediately instead of lingering as a zombie.
+	// Without this, cancelled goroutines block on sem indefinitely, starving
+	// legitimate requests in subsequent steps.
+	//
+	// effectiveC/effectiveServiceMS/queueDepth are recomputed from the
+	// antagonist level AT ARRIVAL TIME and held fixed for the lifetime of the
+	// request. This is what produces the "drain effect": a request dispatched
+	// while the antagonist is calm keeps its short timer even if the
+	// antagonist spikes mid-flight, and vice versa — giving probes a memory
+	// of recent conditions without any synthetic RIF baseline.
+	serve := func(r *http.Request, path string) (int, int32, int, float64) {
+		level := antagonist.level()
+		effectiveC, effectiveServiceMS, queueDepth := computeEffective(capacity, baseServiceMS, level)
+
 		arrivalRIF := rif.Add(1)
 		defer rif.Add(-1)
 
 		if int(arrivalRIF) > queueDepth {
-			return http.StatusServiceUnavailable, arrivalRIF
+			return http.StatusServiceUnavailable, arrivalRIF, level, effectiveServiceMS
 		}
 
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		case <-r.Context().Done():
+			return http.StatusServiceUnavailable, arrivalRIF, level, effectiveServiceMS
+		}
 		defer func() { <-sem }()
 
-		sample := sampleServiceMS()
+		sample := sampleServiceMS(effectiveServiceMS)
 		if debug {
-			log.Printf("path=%s arrival_rif=%d capacity=%d effective_ms=%.0f sample_ms=%.2f",
-				path, arrivalRIF, capacity, effectiveServiceMS, sample)
+			log.Printf("path=%s arrival_rif=%d antagonist=%d%% effective_c=%d effective_ms=%.0f sample_ms=%.2f",
+				path, arrivalRIF, level, effectiveC, effectiveServiceMS, sample)
 		}
-		time.Sleep(time.Duration(sample * float64(time.Millisecond)))
-		return http.StatusOK, arrivalRIF
+		timer := time.NewTimer(time.Duration(sample * float64(time.Millisecond)))
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-r.Context().Done():
+			return http.StatusServiceUnavailable, arrivalRIF, level, effectiveServiceMS
+		}
+		return http.StatusOK, arrivalRIF, level, effectiveServiceMS
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		status, arrivalRIF := serve("/")
+		status, arrivalRIF, level, effectiveServiceMS := serve(r, "/")
 		elapsedMs := time.Since(start).Milliseconds()
 
 		if status == http.StatusOK {
@@ -251,8 +353,8 @@ func main() {
 <body>
 <h1>Backend: %s</h1>
 <p>Processed in %dms (arrival RIF %d)</p>
-<p>Antagonist: %d%%  effective_C: %d  effective_ms: %.0f</p>
-</body></html>`, serverID, elapsedMs, arrivalRIF, antagonistLoad, effectiveC, effectiveServiceMS)
+<p>Antagonist: %d%%  effective_ms: %.0f</p>
+</body></html>`, serverID, elapsedMs, arrivalRIF, level, effectiveServiceMS)
 	})
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -260,9 +362,12 @@ func main() {
 		estimatedMs, hasReal := tracker.medianAtRIF(currentRIF)
 		// Little's Law floor: when no real samples exist near this RIF level
 		// (e.g. sudden load spike with no completions yet), estimate expected
-		// wait from current queue depth. Real measurements take priority.
+		// wait from current queue depth at the current antagonist level. Real
+		// measurements take priority.
 		if !hasReal {
-			if ll := int64(float64(currentRIF) * effectiveServiceMS / float64(capacity)); ll > estimatedMs {
+			level := antagonist.level()
+			effectiveC, effectiveServiceMS, _ := computeEffective(capacity, baseServiceMS, level)
+			if ll := int64(currentRIF) * int64(effectiveServiceMS) / int64(effectiveC); ll > estimatedMs {
 				estimatedMs = ll
 			}
 		}

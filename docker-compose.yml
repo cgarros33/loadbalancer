@@ -32,6 +32,10 @@ services:
       - server8
       - server9
       - server10
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
   loadbalancer-rr:
     build: .
@@ -66,6 +70,10 @@ services:
       - server8
       - server9
       - server10
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
   server1:
     build: ./backend
@@ -75,8 +83,9 @@ services:
     environment:
       - SERVER_ID=server1
       - PORT=80
-      - ANTAGONIST_LOAD=80
-      - BASE_SERVICE_MS=50
+      - ANTAGONIST_BIAS=0.65
+      - MEAN_DWELL_MS=2000
+      - BASE_SERVICE_MS=60
       - CAPACITY=10
       - DEBUG=0
     cpus: 1.0
@@ -89,8 +98,9 @@ services:
     environment:
       - SERVER_ID=server2
       - PORT=80
-      - ANTAGONIST_LOAD=80
-      - BASE_SERVICE_MS=50
+      - ANTAGONIST_BIAS=0.65
+      - MEAN_DWELL_MS=2000
+      - BASE_SERVICE_MS=60
       - CAPACITY=10
       - DEBUG=0
     cpus: 1.0
@@ -103,8 +113,9 @@ services:
     environment:
       - SERVER_ID=server3
       - PORT=80
-      - ANTAGONIST_LOAD=80
-      - BASE_SERVICE_MS=50
+      - ANTAGONIST_BIAS=0.65
+      - MEAN_DWELL_MS=2000
+      - BASE_SERVICE_MS=60
       - CAPACITY=10
       - DEBUG=0
     cpus: 1.0
@@ -117,8 +128,9 @@ services:
     environment:
       - SERVER_ID=server4
       - PORT=80
-      - ANTAGONIST_LOAD=10
-      - BASE_SERVICE_MS=50
+      - ANTAGONIST_BIAS=0.5
+      - MEAN_DWELL_MS=2000
+      - BASE_SERVICE_MS=60
       - CAPACITY=10
       - DEBUG=0
     cpus: 1.0
@@ -131,8 +143,9 @@ services:
     environment:
       - SERVER_ID=server5
       - PORT=80
-      - ANTAGONIST_LOAD=10
-      - BASE_SERVICE_MS=50
+      - ANTAGONIST_BIAS=0.5
+      - MEAN_DWELL_MS=2000
+      - BASE_SERVICE_MS=60
       - CAPACITY=10
       - DEBUG=0
     cpus: 1.0
@@ -145,8 +158,9 @@ services:
     environment:
       - SERVER_ID=server6
       - PORT=80
-      - ANTAGONIST_LOAD=10
-      - BASE_SERVICE_MS=50
+      - ANTAGONIST_BIAS=0.5
+      - MEAN_DWELL_MS=2000
+      - BASE_SERVICE_MS=60
       - CAPACITY=10
       - DEBUG=0
     cpus: 1.0
@@ -159,8 +173,9 @@ services:
     environment:
       - SERVER_ID=server7
       - PORT=80
-      - ANTAGONIST_LOAD=10
-      - BASE_SERVICE_MS=50
+      - ANTAGONIST_BIAS=0.5
+      - MEAN_DWELL_MS=2000
+      - BASE_SERVICE_MS=60
       - CAPACITY=10
       - DEBUG=0
     cpus: 1.0
@@ -173,8 +188,9 @@ services:
     environment:
       - SERVER_ID=server8
       - PORT=80
-      - ANTAGONIST_LOAD=10
-      - BASE_SERVICE_MS=50
+      - ANTAGONIST_BIAS=0.3
+      - MEAN_DWELL_MS=2000
+      - BASE_SERVICE_MS=60
       - CAPACITY=10
       - DEBUG=0
     cpus: 1.0
@@ -187,8 +203,9 @@ services:
     environment:
       - SERVER_ID=server9
       - PORT=80
-      - ANTAGONIST_LOAD=10
-      - BASE_SERVICE_MS=50
+      - ANTAGONIST_BIAS=0.3
+      - MEAN_DWELL_MS=2000
+      - BASE_SERVICE_MS=60
       - CAPACITY=10
       - DEBUG=0
     cpus: 1.0
@@ -201,8 +218,9 @@ services:
     environment:
       - SERVER_ID=server10
       - PORT=80
-      - ANTAGONIST_LOAD=10
-      - BASE_SERVICE_MS=50
+      - ANTAGONIST_BIAS=0.3
+      - MEAN_DWELL_MS=2000
+      - BASE_SERVICE_MS=60
       - CAPACITY=10
       - DEBUG=0
     cpus: 1.0

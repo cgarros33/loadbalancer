@@ -21,11 +21,13 @@ func main() {
 	expName := flag.String("experiment", "b", "experiment to run: a or b")
 	duration := flag.Duration("duration", 30*time.Second, "measurement window per step")
 	warmup := flag.Duration("warmup", 10*time.Second, "warm-up duration before each measurement")
+	drain := flag.Duration("drain", 5*time.Second, "cool-down between warmup end and measurement start")
 	qps := flag.Float64("qps", 100, "target request rate (queries per second)")
 	backends := flag.Int("backends", 10, "number of backend containers")
-	cpuLoad := flag.Int("cpu-load", 50, "baseline (cold) CPU_LOAD antagonist fraction (0-100)")
-	hotFraction := flag.Float64("hot-fraction", 0.0, "fraction of backends that are hot (0.0-1.0)")
-	hotCPULoad := flag.Int("hot-cpu-load", 80, "CPU_LOAD for hot backends")
+	hotBias := flag.Float64("hot-bias", 0.65, "ANTAGONIST_BIAS (p_up) for hot-prone backends")
+	neutralBias := flag.Float64("neutral-bias", 0.5, "ANTAGONIST_BIAS (p_up) for neutral backends")
+	coldBias := flag.Float64("cold-bias", 0.3, "ANTAGONIST_BIAS (p_up) for cold-prone backends")
+	meanDwellMS := flag.Int("mean-dwell-ms", 2000, "mean dwell time (ms) for the antagonist random walk")
 	capacity := flag.Int("capacity", 20, "CAPACITY per backend")
 	baseMS := flag.Int("base-service-ms", 5, "BASE_SERVICE_MS per backend")
 	qrif := flag.Float64("qrif", 0.84, "QRIF quantile for HCL selection")
@@ -65,20 +67,22 @@ func main() {
 	composeFile := "docker-compose.yml"
 
 	algoConfigs := []struct {
-		algo       string
-		url        string
-		metricsURL string
+		algo        string
+		url         string
+		metricsURL  string
+		serviceName string
 	}{
-		{"prequal", *lbPrequal, *lbPrequal + "/metrics"},
-		{"roundrobin", *lbRR, *lbRR + "/metrics"},
+		{"prequal", *lbPrequal, *lbPrequal + "/metrics", "loadbalancer-prequal"},
+		{"roundrobin", *lbRR, *lbRR + "/metrics", "loadbalancer-rr"},
 	}
 
 	makeEnv := func(step experiment.Step) experiment.ComposeEnv {
 		return experiment.ComposeEnv{
 			Backends:            *backends,
-			CPULoad:             *cpuLoad,
-			HotFraction:         *hotFraction,
-			HotCPULoad:          *hotCPULoad,
+			HotBias:             *hotBias,
+			NeutralBias:         *neutralBias,
+			ColdBias:            *coldBias,
+			MeanDwellMS:         *meanDwellMS,
 			BaseServiceMS:       *baseMS,
 			Capacity:            *capacity,
 			CPUsPerBackend:      1.0,
@@ -103,14 +107,14 @@ func main() {
 	}
 
 	// Outer loop: one algorithm at a time.
-	// Backends start ONCE per algorithm and stay running across all probe-rate
-	// steps so their latency trackers accumulate history. Between algorithms we
-	// do a full compose down/up to give each algorithm an uncontaminated
-	// backend state (e.g. RR's hot-backend queue buildup doesn't carry over).
+	// Every step tears down all containers and starts fresh so backends always
+	// have empty queues at measurement time. This prevents accumulated queue
+	// from one step contaminating the next (queue drains slowly; the 3s settle
+	// we had before was far too short when backends are near saturation).
 	for _, ac := range algoConfigs {
 		logger.Info("starting algorithm run", slog.String("algo", ac.algo))
 
-		for i, step := range exp.Steps {
+		for _, step := range exp.Steps {
 			logger.Info("running step",
 				slog.String("algo", ac.algo),
 				slog.String("label", step.Label),
@@ -122,7 +126,12 @@ func main() {
 					logger.Error("compose-gen failed", slog.String("error", err.Error()))
 					os.Exit(1)
 				}
-				if err := experiment.Up(composeFile); err != nil {
+				// Tear down before every step so backends start with empty queues.
+				if err := experiment.Down(composeFile); err != nil {
+					logger.Warn("compose down before step failed (ok if nothing running)",
+						slog.String("error", err.Error()))
+				}
+				if err := experiment.Up(composeFile, ""); err != nil {
 					logger.Error("docker compose up failed", slog.String("error", err.Error()))
 					os.Exit(1)
 				}
@@ -130,13 +139,8 @@ func main() {
 					logger.Error("LB not ready", slog.String("addr", ac.metricsURL), slog.String("error", err.Error()))
 					os.Exit(1)
 				}
-				if i == 0 {
-					// First step: backends are fresh, give extra settle time.
-					time.Sleep(10 * time.Second)
-				} else {
-					// Subsequent steps: backends are warm, only LBs restarted.
-					time.Sleep(3 * time.Second)
-				}
+				// Backends are always fresh; 10s lets the LB probe pool warm up.
+				time.Sleep(10 * time.Second)
 			}
 
 			ctx := context.Background()
@@ -147,13 +151,35 @@ func main() {
 				Duration: *warmup,
 			})
 			time.Sleep(*warmup)
+			// Let hot-backend queues drain before the measurement window.
+			time.Sleep(*drain)
 
 			res := loadgen.Run(ctx, loadgen.Config{
 				URL:      ac.url,
 				QPS:      *qps,
 				Duration: *duration,
 			})
-			rif, _ := loadgen.ScrapeRIF(ac.metricsURL, ac.algo)
+			rif, rifErr := loadgen.ScrapeRIF(ac.metricsURL, ac.algo)
+			if rifErr != nil {
+				logger.Warn("RIF scrape failed", slog.String("error", rifErr.Error()))
+			}
+			if sel, selErr := loadgen.ScrapeSelections(ac.metricsURL, ac.algo); selErr != nil {
+				logger.Warn("selections scrape failed", slog.String("error", selErr.Error()))
+			} else {
+				total := sel.Cold + sel.Hot + sel.Fallback
+				hotPct := 0.0
+				if total > 0 {
+					hotPct = float64(sel.Hot) / float64(total) * 100
+				}
+				logger.Info("HCL routing split",
+					slog.String("algo", ac.algo),
+					slog.String("step", step.Label),
+					slog.Int64("cold", sel.Cold),
+					slog.Int64("hot", sel.Hot),
+					slog.Int64("fallback", sel.Fallback),
+					slog.Float64("hot_pct", hotPct),
+				)
+			}
 
 			row := experiment.Row{
 				Experiment:          exp.Name,
@@ -185,7 +211,6 @@ func main() {
 			if err := experiment.Down(composeFile); err != nil {
 				logger.Error("docker compose down failed", slog.String("error", err.Error()))
 			}
-			time.Sleep(3 * time.Second)
 		}
 	}
 

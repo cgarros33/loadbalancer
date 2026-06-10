@@ -11,9 +11,10 @@ import (
 // ComposeEnv parameterises a docker-compose deployment for one experiment step.
 type ComposeEnv struct {
 	Backends            int
-	CPULoad             int     // baseline (cold) CPU_LOAD
-	HotFraction         float64 // fraction of backends that are hot (0.0–1.0)
-	HotCPULoad          int     // CPU_LOAD for hot backends (used when HotFraction > 0)
+	HotBias             float64 // ANTAGONIST_BIAS (p_up) for hot-prone backends
+	NeutralBias         float64 // ANTAGONIST_BIAS (p_up) for neutral backends
+	ColdBias            float64 // ANTAGONIST_BIAS (p_up) for cold-prone backends
+	MeanDwellMS         int     // mean dwell time (ms) for the antagonist random walk
 	BaseServiceMS       int
 	Capacity            int
 	CPUsPerBackend      float64
@@ -40,9 +41,10 @@ func Generate(env ComposeEnv) error {
 
 	args := []string{
 		fmt.Sprintf("-n=%d", env.Backends),
-		fmt.Sprintf("-cpu-load=%d", env.CPULoad),
-		fmt.Sprintf("-hot-fraction=%.4f", env.HotFraction),
-		fmt.Sprintf("-hot-cpu-load=%d", env.HotCPULoad),
+		fmt.Sprintf("-hot-bias=%.4f", env.HotBias),
+		fmt.Sprintf("-neutral-bias=%.4f", env.NeutralBias),
+		fmt.Sprintf("-cold-bias=%.4f", env.ColdBias),
+		fmt.Sprintf("-mean-dwell-ms=%d", env.MeanDwellMS),
 		fmt.Sprintf("-base-service-ms=%d", env.BaseServiceMS),
 		fmt.Sprintf("-capacity=%d", env.Capacity),
 		fmt.Sprintf("-cpus=%.1f", env.CPUsPerBackend),
@@ -65,18 +67,22 @@ func Build(composeFile string) error {
 	if composeFile != "" {
 		args = append(args, "-f", composeFile)
 	}
-	args = append(args, "build", "--pull")
+	args = append(args, "build")
 	return dockerCmd(args...)
 }
 
 // Up starts containers from already-built images. Images must have been built
 // with Build() beforehand; this skips rebuilding to avoid per-step overhead.
-func Up(composeFile string) error {
+// If service is non-empty, only that service (and its depends_on) is started.
+func Up(composeFile, service string) error {
 	args := []string{"compose"}
 	if composeFile != "" {
 		args = append(args, "-f", composeFile)
 	}
 	args = append(args, "up", "-d")
+	if service != "" {
+		args = append(args, service)
+	}
 	return dockerCmd(args...)
 }
 
