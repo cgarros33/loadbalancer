@@ -17,6 +17,7 @@ type Metrics struct {
 	activeRequests  *prometheus.GaugeVec
 	serverHealth    *prometheus.GaugeVec
 	serverRIF       *prometheus.GaugeVec
+	selectionsTotal *prometheus.CounterVec
 }
 
 func NewMetrics() *Metrics {
@@ -58,6 +59,13 @@ func NewMetrics() *Metrics {
 			},
 			[]string{"server_id", "algorithm"},
 		),
+		selectionsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "selections_total",
+				Help: "Number of backend selections by HCL category (cold/hot/fallback)",
+			},
+			[]string{"algorithm", "type"},
+		),
 	}
 
 	prometheus.MustRegister(m.requestDuration)
@@ -65,6 +73,7 @@ func NewMetrics() *Metrics {
 	prometheus.MustRegister(m.activeRequests)
 	prometheus.MustRegister(m.serverHealth)
 	prometheus.MustRegister(m.serverRIF)
+	prometheus.MustRegister(m.selectionsTotal)
 
 	return m
 }

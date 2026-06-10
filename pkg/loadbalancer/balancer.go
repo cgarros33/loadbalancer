@@ -1,7 +1,6 @@
 package loadbalancer
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -24,15 +23,16 @@ type poolEntry struct {
 }
 
 type LoadBalancer struct {
-	servers []*Server
-	pool    []*poolEntry
-	config  *Config
-	stats   *Stats
-	logger  *slog.Logger
-	metrics *Metrics
-	mutex   sync.RWMutex
-	poolMu  sync.RWMutex
-	rrIndex uint32
+	servers     []*Server
+	pool        []*poolEntry
+	config      *Config
+	stats       *Stats
+	logger      *slog.Logger
+	metrics     *Metrics
+	mutex       sync.RWMutex
+	poolMu      sync.RWMutex
+	rrIndex     uint32
+	probeClient *http.Client
 }
 
 func NewLoadBalancer(config *Config, logger *slog.Logger) *LoadBalancer {
@@ -68,6 +68,13 @@ func NewLoadBalancer(config *Config, logger *slog.Logger) *LoadBalancer {
 		stats:   &Stats{},
 		logger:  logger,
 		metrics: NewMetrics(),
+		probeClient: &http.Client{
+			Timeout: config.ProbeTimeout,
+			Transport: &http.Transport{
+				MaxIdleConnsPerHost: 4,
+				IdleConnTimeout:     30 * time.Second,
+			},
+		},
 	}
 }
 
@@ -152,11 +159,8 @@ func (lb *LoadBalancer) probeOne(srv *Server) {
 }
 
 func (lb *LoadBalancer) probeServer(server *Server) *ProbeResult {
-	ctx, cancel := context.WithTimeout(context.Background(), lb.config.ProbeTimeout)
-	defer cancel()
-
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, "GET",
+	req, err := http.NewRequest("GET",
 		"http://"+server.Address+lb.config.HealthCheckPath, nil)
 	if err != nil {
 		lb.logger.Error("Failed to create probe request",
@@ -165,7 +169,7 @@ func (lb *LoadBalancer) probeServer(server *Server) *ProbeResult {
 		return &ProbeResult{Timestamp: time.Now(), IsHealthy: false}
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := lb.probeClient.Do(req)
 	if err != nil {
 		lb.logger.Error("Probe request failed",
 			slog.String("server", server.ID),
@@ -208,6 +212,19 @@ func (lb *LoadBalancer) probeServer(server *Server) *ProbeResult {
 func (lb *LoadBalancer) AddServer(server *Server) {
 	lb.mutex.Lock()
 	defer lb.mutex.Unlock()
+	if server.proxy == nil {
+		target, _ := url.Parse("http://" + server.Address)
+		proxy := httputil.NewSingleHostReverseProxy(target)
+		// Each server gets its own transport to avoid sharing the global
+		// DefaultTransport pool. With 2000+ probes/s + user traffic all using
+		// DefaultTransport (MaxIdleConnsPerHost=2), the LB creates hundreds of
+		// new TCP connections per second, congesting Docker bridge networking.
+		proxy.Transport = &http.Transport{
+			MaxIdleConnsPerHost: 64,
+			IdleConnTimeout:     90 * time.Second,
+		}
+		server.proxy = proxy
+	}
 	lb.servers = append(lb.servers, server)
 }
 
@@ -243,12 +260,15 @@ func (lb *LoadBalancer) selectServerPrequal() *Server {
 	copy(snapshot, lb.pool)
 	lb.poolMu.RUnlock()
 
+	algorithm := string(lb.config.Algorithm)
+
 	// Cold-start fallback: pool not yet populated.
 	if len(snapshot) == 0 {
 		lb.mutex.RLock()
 		defer lb.mutex.RUnlock()
 		for _, s := range lb.servers {
 			if s.IsHealthy {
+				lb.metrics.selectionsTotal.WithLabelValues(algorithm, "fallback").Inc()
 				return s
 			}
 		}
@@ -265,11 +285,26 @@ func (lb *LoadBalancer) selectServerPrequal() *Server {
 		return nil
 	}
 
-	threshold := rifThreshold(healthy, lb.config.QRIF)
+	// effectiveRIF = max(probe RIF, local in-flight count).
+	// Probe captures load from all LB instances but may be stale.
+	// Local RIF is real-time but only tracks this LB's dispatches —
+	// it is a lower bound when multiple LBs share the same backends.
+	// Taking the max conservatively combines both signals.
+	erifs := make([]int32, len(healthy))
+	for i, e := range healthy {
+		local := atomic.LoadInt32(&e.server.RIF)
+		if local > e.rif {
+			erifs[i] = local
+		} else {
+			erifs[i] = e.rif
+		}
+	}
+
+	threshold := rifThreshold(erifs, lb.config.QRIF)
 
 	var cold, hot []*poolEntry
-	for _, e := range healthy {
-		if e.rif > threshold {
+	for i, e := range healthy {
+		if erifs[i] > threshold {
 			hot = append(hot, e)
 		} else {
 			cold = append(cold, e)
@@ -277,19 +312,21 @@ func (lb *LoadBalancer) selectServerPrequal() *Server {
 	}
 
 	if len(cold) > 0 {
+		lb.metrics.selectionsTotal.WithLabelValues(algorithm, "cold").Inc()
 		return lowestLatency(cold).server
 	}
-	return lowestRIF(hot).server
+	lb.metrics.selectionsTotal.WithLabelValues(algorithm, "hot").Inc()
+	// Among hot backends use effective RIF so we pick the least loaded
+	// by the same combined signal, not just the stale probe value.
+	return lowestEffectiveRIF(hot, erifs, healthy).server
 }
 
-func rifThreshold(entries []*poolEntry, qrif float64) int32 {
-	vals := make([]int32, len(entries))
-	for i, e := range entries {
-		vals[i] = e.rif
-	}
-	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
-	idx := int(float64(len(vals)-1) * qrif)
-	return vals[idx]
+func rifThreshold(rifs []int32, qrif float64) int32 {
+	sorted := make([]int32, len(rifs))
+	copy(sorted, rifs)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	idx := int(float64(len(sorted)-1) * qrif)
+	return sorted[idx]
 }
 
 func lowestLatency(entries []*poolEntry) *poolEntry {
@@ -319,6 +356,23 @@ func lowestRIF(entries []*poolEntry) *poolEntry {
 	best := entries[0]
 	for _, e := range entries[1:] {
 		if e.rif < best.rif {
+			best = e
+		}
+	}
+	return best
+}
+
+// lowestEffectiveRIF picks the hot entry with the smallest effective RIF.
+// hot and erifs are parallel slices; healthy maps erifs indices back to entries.
+func lowestEffectiveRIF(hot []*poolEntry, erifs []int32, healthy []*poolEntry) *poolEntry {
+	// Build a map from poolEntry pointer to its effective RIF index.
+	idx := make(map[*poolEntry]int32, len(healthy))
+	for i, e := range healthy {
+		idx[e] = erifs[i]
+	}
+	best := hot[0]
+	for _, e := range hot[1:] {
+		if idx[e] < idx[best] {
 			best = e
 		}
 	}
@@ -386,14 +440,5 @@ func (lb *LoadBalancer) forwardRequest(server *Server, w http.ResponseWriter, r 
 		)
 	}()
 
-	targetURL, _ := url.Parse("http://" + server.Address)
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		lb.logger.Error("Proxy error", slog.String("error", err.Error()))
-		atomic.AddUint64(&lb.stats.FailedRequests, 1)
-		http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
-	}
-
-	proxy.ServeHTTP(w, r)
+	server.proxy.ServeHTTP(w, r)
 }

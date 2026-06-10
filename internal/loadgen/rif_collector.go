@@ -53,6 +53,68 @@ func ScrapeRIF(metricsURL, algorithm string) (RIFStats, error) {
 	return RIFStats{}, fmt.Errorf("rif_at_dispatch{algorithm=%q} not found in %s", algorithm, metricsURL)
 }
 
+// SelectionStats holds cold/hot/fallback counters scraped from selections_total.
+type SelectionStats struct {
+	Cold, Hot, Fallback int64
+}
+
+// ScrapeSelections fetches selections_total from metricsURL and returns
+// the cumulative cold/hot/fallback counts for the given algorithm.
+func ScrapeSelections(metricsURL, algorithm string) (SelectionStats, error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(metricsURL)
+	if err != nil {
+		return SelectionStats{}, fmt.Errorf("scrape %s: %w", metricsURL, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return SelectionStats{}, fmt.Errorf("read body: %w", err)
+	}
+
+	parser := expfmt.NewDecoder(strings.NewReader(string(body)), expfmt.NewFormat(expfmt.TypeTextPlain))
+	var stats SelectionStats
+	found := false
+	for {
+		var mf dto.MetricFamily
+		if err := parser.Decode(&mf); err != nil {
+			break
+		}
+		if mf.GetName() != "selections_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if !hasLabel(m, "algorithm", algorithm) {
+				continue
+			}
+			found = true
+			v := int64(m.GetCounter().GetValue())
+			switch labelValue(m, "type") {
+			case "cold":
+				stats.Cold = v
+			case "hot":
+				stats.Hot = v
+			case "fallback":
+				stats.Fallback = v
+			}
+		}
+	}
+	if !found {
+		return SelectionStats{}, fmt.Errorf("selections_total{algorithm=%q} not found in %s", algorithm, metricsURL)
+	}
+	return stats, nil
+}
+
+func labelValue(m *dto.Metric, key string) string {
+	for _, lp := range m.GetLabel() {
+		if lp.GetName() == key {
+			return lp.GetValue()
+		}
+	}
+	return ""
+}
+
 func hasLabel(m *dto.Metric, key, value string) bool {
 	for _, lp := range m.GetLabel() {
 		if lp.GetName() == key && lp.GetValue() == value {

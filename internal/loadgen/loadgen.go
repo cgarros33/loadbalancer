@@ -49,7 +49,13 @@ func Run(ctx context.Context, cfg Config) Result {
 		sem = make(chan struct{}, cfg.MaxConcurrent)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: 1000,
+			MaxConnsPerHost:     1000,
+		},
+	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

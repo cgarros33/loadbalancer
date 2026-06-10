@@ -1,6 +1,8 @@
 package loadbalancer
 
 import (
+	"net/http/httputil"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -12,6 +14,18 @@ type Server struct {
 	Latency   int64
 	IsHealthy bool
 	LastProbe time.Time
+	proxy     *httputil.ReverseProxy
+}
+
+func newServer(id, address string) *Server {
+	target, _ := url.Parse("http://" + address)
+	p := httputil.NewSingleHostReverseProxy(target)
+	return &Server{
+		ID:        id,
+		Address:   address,
+		IsHealthy: true,
+		proxy:     p,
+	}
 }
 
 type ProbeResult struct {
