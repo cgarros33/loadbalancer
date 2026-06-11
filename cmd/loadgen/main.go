@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"time"
@@ -13,6 +14,7 @@ func main() {
 	url := flag.String("url", "http://localhost:8080/", "target URL")
 	qps := flag.Float64("qps", 100, "requests per second")
 	dur := flag.Duration("duration", 30*time.Second, "duration")
+	jsonOut := flag.Bool("json", false, "print result as JSON (for programmatic consumers)")
 	flag.Parse()
 
 	res := loadgen.Run(context.Background(), loadgen.Config{
@@ -20,6 +22,16 @@ func main() {
 		QPS:      *qps,
 		Duration: *dur,
 	})
+
+	if *jsonOut {
+		b, err := json.Marshal(res)
+		if err != nil {
+			fmt.Println("{}")
+			return
+		}
+		fmt.Println(string(b))
+		return
+	}
 
 	errPct := float64(0)
 	if res.Total > 0 {

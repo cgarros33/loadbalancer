@@ -24,8 +24,11 @@ func main() {
 	drain := flag.Duration("drain", 5*time.Second, "cool-down between warmup end and measurement start")
 	qps := flag.Float64("qps", 100, "target request rate (queries per second)")
 	backends := flag.Int("backends", 10, "number of backend containers")
-	hotBias := flag.Float64("hot-bias", 0.65, "ANTAGONIST_BIAS (p_up) for hot-prone backends")
-	neutralBias := flag.Float64("neutral-bias", 0.5, "ANTAGONIST_BIAS (p_up) for neutral backends")
+	// See cmd/compose-gen/main.go for the rationale: these defaults keep the
+	// random walk's stationary probability of the unsustainable 80%-antagonist
+	// (rho=1.5) ceiling at ~20%/~10%/~2% for hot/neutral/cold groups.
+	hotBias := flag.Float64("hot-bias", 0.50, "ANTAGONIST_BIAS (p_up) for hot-prone backends")
+	neutralBias := flag.Float64("neutral-bias", 0.425, "ANTAGONIST_BIAS (p_up) for neutral backends")
 	coldBias := flag.Float64("cold-bias", 0.3, "ANTAGONIST_BIAS (p_up) for cold-prone backends")
 	meanDwellMS := flag.Int("mean-dwell-ms", 2000, "mean dwell time (ms) for the antagonist random walk")
 	capacity := flag.Int("capacity", 20, "CAPACITY per backend")
@@ -67,13 +70,14 @@ func main() {
 	composeFile := "docker-compose.yml"
 
 	algoConfigs := []struct {
-		algo        string
-		url         string
-		metricsURL  string
-		serviceName string
+		algo         string
+		url          string
+		containerURL string // container-DNS address, used by RunLoadgen
+		metricsURL   string
+		serviceName  string
 	}{
-		{"prequal", *lbPrequal, *lbPrequal + "/metrics", "loadbalancer-prequal"},
-		{"roundrobin", *lbRR, *lbRR + "/metrics", "loadbalancer-rr"},
+		{"prequal", *lbPrequal, "http://lb-prequal:8080", *lbPrequal + "/metrics", "loadbalancer-prequal"},
+		{"roundrobin", *lbRR, "http://lb-roundrobin:8080", *lbRR + "/metrics", "loadbalancer-rr"},
 	}
 
 	makeEnv := func(step experiment.Step) experiment.ComposeEnv {
@@ -145,20 +149,33 @@ func main() {
 
 			ctx := context.Background()
 
-			go loadgen.Run(ctx, loadgen.Config{
-				URL:      ac.url,
-				QPS:      *qps,
-				Duration: *warmup,
-			})
-			time.Sleep(*warmup)
+			// runLoad fires QPS for dur and returns the result. On CloudLab
+			// (--cloudlab) the experiment binary runs co-located with the LB
+			// and hits it directly over localhost. Otherwise it runs the
+			// "loadgen" container attached to the compose network, talking to
+			// the LB over container DNS — this avoids host-published ports,
+			// which on Docker Desktop/WSL2 go through a slow cross-VM relay
+			// that becomes the real bottleneck on long runs (and ensures dev
+			// and CloudLab measure the same network path).
+			runLoad := func(dur time.Duration) loadgen.Result {
+				if *cloudlab {
+					return loadgen.Run(ctx, loadgen.Config{URL: ac.url, QPS: *qps, Duration: dur})
+				}
+				res, err := experiment.RunLoadgen(composeFile, ac.containerURL, *qps, dur)
+				if err != nil {
+					logger.Error("loadgen container failed", slog.String("error", err.Error()))
+					os.Exit(1)
+				}
+				return res
+			}
+
+			if *warmup > 0 {
+				runLoad(*warmup)
+			}
 			// Let hot-backend queues drain before the measurement window.
 			time.Sleep(*drain)
 
-			res := loadgen.Run(ctx, loadgen.Config{
-				URL:      ac.url,
-				QPS:      *qps,
-				Duration: *duration,
-			})
+			res := runLoad(*duration)
 			rif, rifErr := loadgen.ScrapeRIF(ac.metricsURL, ac.algo)
 			if rifErr != nil {
 				logger.Warn("RIF scrape failed", slog.String("error", rifErr.Error()))

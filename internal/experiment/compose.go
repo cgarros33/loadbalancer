@@ -1,11 +1,14 @@
 package experiment
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"time"
+
+	"github.com/omarshaarawi/loadbalancer/internal/loadgen"
 )
 
 // ComposeEnv parameterises a docker-compose deployment for one experiment step.
@@ -67,7 +70,9 @@ func Build(composeFile string) error {
 	if composeFile != "" {
 		args = append(args, "-f", composeFile)
 	}
-	args = append(args, "build")
+	// --profile tools pulls in the loadgen image (used by RunLoadgen) in
+	// addition to the default services.
+	args = append(args, "--profile", "tools", "build")
 	return dockerCmd(args...)
 }
 
@@ -113,6 +118,37 @@ func WaitReady(url string, timeout time.Duration) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("service not ready after %s: %s", timeout, url)
+}
+
+// RunLoadgen runs the "loadgen" service (built from Dockerfile.loadgen)
+// attached to the compose network and returns its parsed result. url should
+// be a container-DNS address reachable from inside that network (e.g.
+// "http://lb-prequal:8080"), not a host-published port: published ports go
+// through the host's network stack (and, on Docker Desktop/WSL2, a slow
+// cross-VM relay) which can itself become the bottleneck on long runs.
+func RunLoadgen(composeFile, url string, qps float64, duration time.Duration) (loadgen.Result, error) {
+	args := []string{"compose"}
+	if composeFile != "" {
+		args = append(args, "-f", composeFile)
+	}
+	args = append(args, "--profile", "tools", "run", "--rm", "-T", "loadgen",
+		"-url", url,
+		"-qps", fmt.Sprintf("%.4f", qps),
+		"-duration", duration.String(),
+		"-json")
+
+	cmd := exec.Command("docker", args...)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return loadgen.Result{}, fmt.Errorf("docker compose run loadgen: %w", err)
+	}
+
+	var res loadgen.Result
+	if err := json.Unmarshal(out, &res); err != nil {
+		return loadgen.Result{}, fmt.Errorf("parsing loadgen output: %w (output: %s)", err, out)
+	}
+	return res, nil
 }
 
 func dockerCmd(args ...string) error {

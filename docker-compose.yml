@@ -83,7 +83,7 @@ services:
     environment:
       - SERVER_ID=server1
       - PORT=80
-      - ANTAGONIST_BIAS=0.65
+      - ANTAGONIST_BIAS=0.5
       - MEAN_DWELL_MS=2000
       - BASE_SERVICE_MS=60
       - CAPACITY=10
@@ -98,7 +98,7 @@ services:
     environment:
       - SERVER_ID=server2
       - PORT=80
-      - ANTAGONIST_BIAS=0.65
+      - ANTAGONIST_BIAS=0.5
       - MEAN_DWELL_MS=2000
       - BASE_SERVICE_MS=60
       - CAPACITY=10
@@ -113,7 +113,7 @@ services:
     environment:
       - SERVER_ID=server3
       - PORT=80
-      - ANTAGONIST_BIAS=0.65
+      - ANTAGONIST_BIAS=0.5
       - MEAN_DWELL_MS=2000
       - BASE_SERVICE_MS=60
       - CAPACITY=10
@@ -128,7 +128,7 @@ services:
     environment:
       - SERVER_ID=server4
       - PORT=80
-      - ANTAGONIST_BIAS=0.5
+      - ANTAGONIST_BIAS=0.425
       - MEAN_DWELL_MS=2000
       - BASE_SERVICE_MS=60
       - CAPACITY=10
@@ -143,7 +143,7 @@ services:
     environment:
       - SERVER_ID=server5
       - PORT=80
-      - ANTAGONIST_BIAS=0.5
+      - ANTAGONIST_BIAS=0.425
       - MEAN_DWELL_MS=2000
       - BASE_SERVICE_MS=60
       - CAPACITY=10
@@ -158,7 +158,7 @@ services:
     environment:
       - SERVER_ID=server6
       - PORT=80
-      - ANTAGONIST_BIAS=0.5
+      - ANTAGONIST_BIAS=0.425
       - MEAN_DWELL_MS=2000
       - BASE_SERVICE_MS=60
       - CAPACITY=10
@@ -173,7 +173,7 @@ services:
     environment:
       - SERVER_ID=server7
       - PORT=80
-      - ANTAGONIST_BIAS=0.5
+      - ANTAGONIST_BIAS=0.425
       - MEAN_DWELL_MS=2000
       - BASE_SERVICE_MS=60
       - CAPACITY=10
@@ -248,6 +248,15 @@ services:
       - loadbalancer-net
     depends_on:
       - prometheus
+
+  loadgen:
+    build:
+      context: .
+      dockerfile: Dockerfile.loadgen
+    networks:
+      - loadbalancer-net
+    profiles:
+      - tools
 
 networks:
   loadbalancer-net:

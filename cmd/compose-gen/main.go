@@ -95,6 +95,15 @@ const composeTmpl = `services:
     depends_on:
       - prometheus
 
+  loadgen:
+    build:
+      context: .
+      dockerfile: Dockerfile.loadgen
+    networks:
+      - loadbalancer-net
+    profiles:
+      - tools
+
 networks:
   loadbalancer-net:
     driver: bridge
@@ -115,8 +124,15 @@ type tmplData struct {
 
 func main() {
 	n := flag.Int("n", 10, "number of backend servers")
-	hotBias := flag.Float64("hot-bias", 0.65, "ANTAGONIST_BIAS (p_up) for hot-prone backends")
-	neutralBias := flag.Float64("neutral-bias", 0.5, "ANTAGONIST_BIAS (p_up) for neutral backends")
+	// Bias values are chosen so the random walk's stationary probability of
+	// sitting at the 80%-antagonist ceiling (the only level with rho>1, i.e.
+	// the unsustainable 1.5x-load level) is modest: ~20% for hot, ~10% for
+	// neutral, ~2% for cold (pi_4 = r^4/(1+r+r^2+r^3+r^4), r=p/(1-p)). The
+	// previous defaults (0.65/0.5/0.3) gave pi_4 of ~48%/~20%/~2%, meaning
+	// hot backends spent nearly half their time at the unsustainable ceiling
+	// in steady state, causing ~68% error rates on long (60s+) runs.
+	hotBias := flag.Float64("hot-bias", 0.50, "ANTAGONIST_BIAS (p_up) for hot-prone backends")
+	neutralBias := flag.Float64("neutral-bias", 0.425, "ANTAGONIST_BIAS (p_up) for neutral backends")
 	coldBias := flag.Float64("cold-bias", 0.3, "ANTAGONIST_BIAS (p_up) for cold-prone backends")
 	meanDwellMS := flag.Int("mean-dwell-ms", 2000, "MEAN_DWELL_MS for the antagonist random walk")
 	baseMS := flag.Int("base-service-ms", 5, "BASE_SERVICE_MS baseline latency per request")
