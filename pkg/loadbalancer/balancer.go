@@ -2,6 +2,7 @@ package loadbalancer
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"net/http"
@@ -33,7 +34,24 @@ type LoadBalancer struct {
 	poolMu      sync.RWMutex
 	rrIndex     uint32
 	probeClient *http.Client
+	probeJobs   chan *Server
 }
+
+// probeWorkers is the size of the fixed pool of goroutines that execute
+// probes. fireProbes() wants to issue up to PROBE_RATE_MULTIPLIER * QPS
+// probes/sec (e.g. 2000/sec at rate=4.0, QPS=500); under normal conditions
+// probes complete in <5ms so steady-state concurrency is only ~10. A fixed
+// pool of long-lived workers absorbs that load without spawning a goroutine
+// per probe, avoiding the scheduler/syscall churn (goroutine create/destroy
+// at thousands/sec) that can otherwise consume an entire CPU core and starve
+// the goroutines handling actual proxied requests.
+const probeWorkers = 50
+
+// probeQueueSize bounds the backlog of pending probe jobs. If backends slow
+// down and workers fall behind, fireProbes() drops new probes once the queue
+// is full rather than blocking the request path — a missed probe just means
+// slightly staler pool data.
+const probeQueueSize = 100
 
 func NewLoadBalancer(config *Config, logger *slog.Logger) *LoadBalancer {
 	if config == nil {
@@ -61,7 +79,7 @@ func NewLoadBalancer(config *Config, logger *slog.Logger) *LoadBalancer {
 		config.ProbeRateMultiplier = 3.0
 	}
 
-	return &LoadBalancer{
+	lb := &LoadBalancer{
 		servers: make([]*Server, 0),
 		pool:    make([]*poolEntry, 0, config.ProbePoolSize),
 		config:  config,
@@ -71,10 +89,39 @@ func NewLoadBalancer(config *Config, logger *slog.Logger) *LoadBalancer {
 		probeClient: &http.Client{
 			Timeout: config.ProbeTimeout,
 			Transport: &http.Transport{
-				MaxIdleConnsPerHost: 4,
-				IdleConnTimeout:     30 * time.Second,
+				// MaxIdleConnsPerHost must cover the actual probe concurrency
+				// per backend (up to PROBE_RATE_MULTIPLIER * QPS / numServers
+				// in flight at once). Too small and probe connections churn
+				// into TIME_WAIT faster than the kernel reclaims them
+				// (net.ipv4.tcp_max_tw_buckets, default 65536), which
+				// eventually starves the LB of outbound sockets entirely.
+				MaxIdleConnsPerHost: 64,
+				// MaxConnsPerHost caps total (idle + active) connections per
+				// backend, including ones opened to replace probes that were
+				// abandoned on timeout. Without this, a run of slow/timed-out
+				// probes can make the transport open unbounded fresh
+				// connections (and their read/write-loop goroutines) to the
+				// same backend.
+				MaxConnsPerHost: 64,
+				IdleConnTimeout: 90 * time.Second,
 			},
 		},
+		probeJobs: make(chan *Server, probeQueueSize),
+	}
+
+	for i := 0; i < probeWorkers; i++ {
+		go lb.probeWorker()
+	}
+
+	return lb
+}
+
+// probeWorker pulls servers off the probe job queue and probes them. A fixed
+// pool of these is started once in NewLoadBalancer; fireProbes() feeds the
+// queue rather than spawning a new goroutine per probe.
+func (lb *LoadBalancer) probeWorker() {
+	for srv := range lb.probeJobs {
+		lb.probeOne(srv)
 	}
 }
 
@@ -176,7 +223,13 @@ func (lb *LoadBalancer) probeServer(server *Server) *ProbeResult {
 			slog.String("error", err.Error()))
 		return &ProbeResult{Timestamp: time.Now(), IsHealthy: false}
 	}
+	// Drain the body before closing so the underlying connection can be
+	// reused by the transport's idle pool. An undrained body forces the
+	// transport to close the connection instead, which at probe-rate
+	// volumes (1000s/sec) exhausts net.ipv4.tcp_max_tw_buckets within
+	// seconds and starves the LB of outbound sockets entirely.
 	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
 
 	var rif int32
 	if v := resp.Header.Get("X-Requests-In-Flight"); v != "" {
@@ -221,7 +274,21 @@ func (lb *LoadBalancer) AddServer(server *Server) {
 		// new TCP connections per second, congesting Docker bridge networking.
 		proxy.Transport = &http.Transport{
 			MaxIdleConnsPerHost: 64,
-			IdleConnTimeout:     90 * time.Second,
+			// MaxConnsPerHost caps total connections to this backend. Without
+			// it, MaxIdleConnsPerHost only bounds the idle pool — if the
+			// backend slows down, the proxy can keep opening new active
+			// connections without limit. Backend capacity is 10 in-flight
+			// requests, so 64 leaves generous headroom while still bounding.
+			MaxConnsPerHost: 64,
+			IdleConnTimeout: 90 * time.Second,
+			// ResponseHeaderTimeout bounds how long the proxy waits for a
+			// backend to start responding, set just under the load
+			// generator's 5s client timeout. Without it, a slow backend
+			// holds the connection until the client gives up at 5s and
+			// disconnects mid-copy, forcing the transport to discard the
+			// connection; failing slightly earlier returns a clean 502
+			// instead of relying on client-side cancellation.
+			ResponseHeaderTimeout: 4 * time.Second,
 		}
 		server.proxy = proxy
 	}
@@ -400,7 +467,12 @@ func (lb *LoadBalancer) fireProbes() {
 
 	for i := 0; i < count; i++ {
 		srv := servers[rand.Intn(len(servers))]
-		go lb.probeOne(srv)
+		select {
+		case lb.probeJobs <- srv:
+		default:
+			// Workers are backlogged: drop this probe rather than queue
+			// indefinitely or spawn an extra goroutine.
+		}
 	}
 }
 
