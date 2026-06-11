@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -80,8 +81,16 @@ func main() {
 	lb.StartProbing()
 
 	mux := http.NewServeMux()
-	mux.Handle("/", lb)
 	mux.Handle("/metrics", promhttp.Handler())
+	// Diagnostic-only: pprof endpoints for live goroutine/connection
+	// inspection during sustained-load runs. Registered before "/" so the
+	// catch-all proxy handler doesn't shadow them.
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/", lb)
 
 	server := &http.Server{
 		Addr:    ":" + *port,
