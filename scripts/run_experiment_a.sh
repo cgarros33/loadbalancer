@@ -41,12 +41,17 @@
 # not draining response bodies, causing TIME_WAIT exhaustion at long
 # durations — was also fixed in pkg/loadbalancer/balancer.go.)
 #
-# Usage: ./scripts/run_experiment_a.sh [OUTPUT]
-#   OUTPUT  CSV file path (default: results_a.csv)
+# Usage: ./scripts/run_experiment_a.sh [OUTPUT] [BACKENDS] [QPS]
+#   OUTPUT    CSV file path (default: results_a.csv)
+#   BACKENDS  number of backend containers (default: 10)
+#   QPS       target request rate; default scales with BACKENDS to keep
+#             QPS/backends ~= 50 (e.g. 100 backends -> 5000 qps)
 
 set -euo pipefail
 
 OUTPUT=${1:-results_a.csv}
+BACKENDS=${2:-10}
+QPS=${3:-$((BACKENDS * 50))}
 BINARY=./bin/experiment
 
 if [[ ! -x "$BINARY" ]]; then
@@ -55,13 +60,13 @@ if [[ ! -x "$BINARY" ]]; then
 fi
 
 echo "=== Experiment A: probe rate sweep at 1.5× allocation ==="
-echo "output: $OUTPUT"
+echo "output: $OUTPUT  backends: $BACKENDS  qps: $QPS"
 echo ""
 
 "$BINARY" \
     --experiment       a       \
-    --qps              500     \
-    --backends         10      \
+    --qps              "$QPS"  \
+    --backends         "$BACKENDS" \
     --capacity         10      \
     --base-service-ms  60      \
     --hot-bias         0.50    \
