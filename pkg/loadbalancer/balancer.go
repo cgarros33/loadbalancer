@@ -39,19 +39,24 @@ type LoadBalancer struct {
 
 // probeWorkers is the size of the fixed pool of goroutines that execute
 // probes. fireProbes() wants to issue up to PROBE_RATE_MULTIPLIER * QPS
-// probes/sec (e.g. 2000/sec at rate=4.0, QPS=500); under normal conditions
-// probes complete in <5ms so steady-state concurrency is only ~10. A fixed
-// pool of long-lived workers absorbs that load without spawning a goroutine
-// per probe, avoiding the scheduler/syscall churn (goroutine create/destroy
-// at thousands/sec) that can otherwise consume an entire CPU core and starve
-// the goroutines handling actual proxied requests.
-const probeWorkers = 50
+// probes/sec (e.g. 7500/sec at rate=3.0, QPS=2500 with 50 backends); under
+// normal conditions probes complete in <5ms so steady-state concurrency is
+// only a small fraction of that. A fixed pool of long-lived workers absorbs
+// that load without spawning a goroutine per probe, avoiding the
+// scheduler/syscall churn (goroutine create/destroy at thousands/sec) that
+// can otherwise consume an entire CPU core and starve the goroutines
+// handling actual proxied requests. Sized for 50-backend runs at 2500 QPS;
+// at 50 workers (the previous value, sized for 10 backends at 500 QPS) the
+// queue saturated under that probe volume, dropping probes and letting the
+// pool go stale enough to route into overloaded backends (measurable as a
+// 0.4-3.5% error rate across Experiment B's probe-pool sweep).
+const probeWorkers = 150
 
 // probeQueueSize bounds the backlog of pending probe jobs. If backends slow
 // down and workers fall behind, fireProbes() drops new probes once the queue
 // is full rather than blocking the request path — a missed probe just means
 // slightly staler pool data.
-const probeQueueSize = 100
+const probeQueueSize = 300
 
 func NewLoadBalancer(config *Config, logger *slog.Logger) *LoadBalancer {
 	if config == nil {
