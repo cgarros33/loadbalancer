@@ -48,7 +48,7 @@ func ExperimentA(baseQPS float64) Experiment {
 // ExperimentB is the original sweep: vary probe pool size at ~75% load.
 // ProbeRateMultiplier is held fixed at 3.0; ProbePoolSize varies.
 func ExperimentB() Experiment {
-	sizes := []int{1, 2, 4, 8, 16, 24, 32}
+	sizes := []int{1, 2, 4, 8, 16, 24, 32, 40, 48}
 	steps := make([]Step, len(sizes))
 	for i, sz := range sizes {
 		steps[i] = Step{
