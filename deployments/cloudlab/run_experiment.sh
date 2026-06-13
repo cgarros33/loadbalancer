@@ -53,7 +53,7 @@ BIN_DIR="$REPO_ROOT/bin/linux"
 # ── defaults ──────────────────────────────────────────────────────────────────
 NODES_FILE="$SCRIPT_DIR/nodes.txt"
 SSH_USER="$USER"
-SSH_KEY="$HOME/.ssh/id_rsa"
+SSH_KEY="$HOME/.ssh/id_ed25519"
 SEPARATE_LB=true
 LOADGEN_NODE=""
 EXPERIMENT="b"
@@ -107,8 +107,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ssh_cmd() { ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$SSH_USER@$1" "${@:2}"; }
-scp_cmd() { scp -i "$SSH_KEY" -o StrictHostKeyChecking=no "$@"; }
+ssh_cmd() { ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$1" "${@:2}"; }
+scp_cmd() { scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"; }
 short_host() { echo "$1" | cut -d. -f1; }
 
 # ── read nodes ────────────────────────────────────────────────────────────────
@@ -170,7 +170,7 @@ fi
 if ! $SKIP_SETUP; then
     echo ">>> copying binaries to all nodes..."
     for node in "${SETUP_NODES[@]}"; do
-        "$SCRIPT_DIR/setup.sh" "$node" "$SSH_USER" &
+        "$SCRIPT_DIR/setup.sh" "$node" "$SSH_USER" "$SSH_KEY" &
     done
     wait
     echo ">>> binaries copied"
@@ -178,11 +178,8 @@ fi
 
 # ── compute per-backend placement (node, port, antagonist bias group) ─────────
 # Backend i (0-indexed) is placed on node (i % N_BACKEND_NODES) using port
-# BASE_PORT + (i / N_BACKEND_NODES). Bias groups follow the same thirds split
-# as cmd/compose-gen: first third hot-prone, last third cold-prone, rest neutral.
-N_HOT=$((N_BACKENDS / 3))
-N_COLD=$((N_BACKENDS / 3))
-
+# BASE_PORT + (i / N_BACKEND_NODES). Bias is linearly interpolated between
+# HOT_BIAS and COLD_BIAS to give each server a differing initial antagonistic load.
 declare -a BACKEND_HOST BACKEND_PORT BACKEND_BIAS
 declare -A NODE_SPECS   # node index -> "id:port:bias id:port:bias ..."
 for ((j = 0; j < N_BACKEND_NODES; j++)); do NODE_SPECS[$j]=""; done
@@ -190,15 +187,15 @@ for ((j = 0; j < N_BACKEND_NODES; j++)); do NODE_SPECS[$j]=""; done
 for ((i = 0; i < N_BACKENDS; i++)); do
     node_idx=$((i % N_BACKEND_NODES))
     port=$((BASE_PORT + i / N_BACKEND_NODES))
-    if (( i < N_HOT )); then
-        bias="$HOT_BIAS"
-    elif (( i < N_BACKENDS - N_COLD )); then
-        bias="$NEUTRAL_BIAS"
+    
+    if (( N_BACKENDS > 1 )); then
+        bias=$(LC_ALL=C awk -v i="$i" -v n="$N_BACKENDS" -v h="$HOT_BIAS" -v c="$COLD_BIAS" 'BEGIN { printf "%.3f", h - (h - c) * i / (n - 1) }')
     else
-        bias="$COLD_BIAS"
+        bias="$HOT_BIAS"
     fi
+    
     server_id="server-$((i+1))"
-    BACKEND_HOST[$i]="$(short_host "${BACKEND_NODES[$node_idx]}")"
+    BACKEND_HOST[$i]="${BACKEND_NODES[$node_idx]}"
     BACKEND_PORT[$i]="$port"
     BACKEND_BIAS[$i]="$bias"
     NODE_SPECS[$node_idx]+="${server_id}:${port}:${bias} "
@@ -206,7 +203,7 @@ done
 
 PER_NODE_MAX=$(( (N_BACKENDS + N_BACKEND_NODES - 1) / N_BACKEND_NODES ))
 echo ">>> placement: $N_BACKENDS backends across $N_BACKEND_NODES nodes (up to $PER_NODE_MAX/node, ports $BASE_PORT-$((BASE_PORT + PER_NODE_MAX - 1)))"
-echo ">>> bias groups: $N_HOT hot @ $HOT_BIAS, $((N_BACKENDS - N_HOT - N_COLD)) neutral @ $NEUTRAL_BIAS, $N_COLD cold @ $COLD_BIAS"
+echo ">>> bias groups: linearly distributed from $HOT_BIAS to $COLD_BIAS"
 
 # ── start backends ────────────────────────────────────────────────────────────
 if ! $SKIP_START; then
@@ -215,36 +212,60 @@ if ! $SKIP_START; then
         node="${BACKEND_NODES[$j]}"
         specs="${NODE_SPECS[$j]}"
         [[ -z "$specs" ]] && continue
-        ssh_cmd "$node" \
-            BACKEND_SPECS="$specs" \
-            MEAN_DWELL_MS="$MEAN_DWELL_MS" \
-            BASE_SERVICE_MS="$BASE_SERVICE_MS" \
-            CAPACITY="$CAPACITY" \
-            bash < "$SCRIPT_DIR/run_backends.sh" &
+        ssh_cmd "$node" "BACKEND_SPECS='$specs' MEAN_DWELL_MS='$MEAN_DWELL_MS' BASE_SERVICE_MS='$BASE_SERVICE_MS' CAPACITY='$CAPACITY' bash" < "$SCRIPT_DIR/run_backends.sh" &
     done
     wait
     echo ">>> backends started"
     sleep 2
 fi
 
+# ── open firewall ports on all nodes ──────────────────────────────────────────
+if ! $SKIP_START; then
+    echo ">>> opening firewall ports 8080-8099 on all nodes..."
+    for node in "${ALL_NODES[@]}"; do
+        ssh_cmd "$node" "sudo iptables -I INPUT -p tcp --dport 8080:8099 -j ACCEPT 2>/dev/null; \
+                         sudo ufw allow 8080:8099/tcp 2>/dev/null; \
+                         echo 'firewall opened on \$(hostname)'" &
+    done
+    wait
+fi
+
 # ── start LB ─────────────────────────────────────────────────────────────────
 if ! $SKIP_START; then
     echo ">>> starting LB on $LB_NODE..."
 
-    BACKEND_ENV=()
+    BACKEND_ENV=""
     for ((i = 0; i < N_BACKENDS; i++)); do
-        BACKEND_ENV+=("BACKEND_SERVER$((i+1))=${BACKEND_HOST[$i]}:${BACKEND_PORT[$i]}")
+        BACKEND_ENV+="BACKEND_SERVER$((i+1))='${BACKEND_HOST[$i]}:${BACKEND_PORT[$i]}' "
     done
 
-    ssh_cmd "$LB_NODE" \
-        env "${BACKEND_ENV[@]}" \
-        PROBE_POOL_SIZE="$PROBE_POOL_SIZE" \
-        PROBE_RATE_MULTIPLIER="$PROBE_RATE_MULT" \
-        QRIF="$QRIF" \
-        bash < "$SCRIPT_DIR/run_lb.sh"
+    ssh_cmd "$LB_NODE" "${BACKEND_ENV} PROBE_POOL_SIZE='$PROBE_POOL_SIZE' PROBE_RATE_MULTIPLIER='$PROBE_RATE_MULT' QRIF='$QRIF' bash" < "$SCRIPT_DIR/run_lb.sh"
 
     echo ">>> LBs started; waiting for readiness..."
     sleep 3
+
+    # ── connectivity check ────────────────────────────────────────────────
+    echo ">>> running connectivity check from LB node..."
+    # Test first backend on each node
+    CHECKS_OK=0
+    CHECKS_FAIL=0
+    for ((j = 0; j < N_BACKEND_NODES; j++)); do
+        node="${BACKEND_NODES[$j]}"
+        result=$(ssh_cmd "$LB_NODE" "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://${node}:${BASE_PORT}/health 2>&1" || echo "FAIL")
+        if [[ "$result" == "200" ]]; then
+            echo "  ✓ $node:${BASE_PORT} reachable (HTTP $result)"
+            ((CHECKS_OK++)) || true
+        else
+            echo "  ✗ $node:${BASE_PORT} UNREACHABLE ($result)"
+            ((CHECKS_FAIL++)) || true
+        fi
+    done
+    echo ">>> connectivity: $CHECKS_OK OK, $CHECKS_FAIL FAILED out of $N_BACKEND_NODES nodes"
+    if [[ $CHECKS_FAIL -gt 0 ]]; then
+        echo "WARNING: some backends are unreachable from the LB node!"
+        echo "  Check: are backends running? (ssh $SSH_USER@<node> 'ps aux | grep backend')"
+        echo "  Check: firewall? (ssh $SSH_USER@<node> 'sudo iptables -L -n | grep 8080')"
+    fi
 fi
 
 # ── derive LB URLs as seen from the loadgen node ──────────────────────────────
@@ -252,7 +273,7 @@ if [[ "$LOADGEN_NODE" == "$LB_NODE" ]]; then
     LB_PREQUAL_URL="http://localhost:8080"
     LB_RR_URL="http://localhost:8081"
 else
-    LB_HOST="$(short_host "$LB_NODE")"
+    LB_HOST="$LB_NODE"
     LB_PREQUAL_URL="http://${LB_HOST}:8080"
     LB_RR_URL="http://${LB_HOST}:8081"
 fi

@@ -20,6 +20,7 @@ CAPACITY="${CAPACITY:-20}"
 pkill -f "prequal/backend" 2>/dev/null || true
 sleep 0.5
 
+CORE_ID=0
 for spec in $BACKEND_SPECS; do
     IFS=: read -r server_id port bias <<< "$spec"
     LOG="$HOME/prequal/backend-${server_id}.log"
@@ -31,7 +32,9 @@ for spec in $BACKEND_SPECS; do
         MEAN_DWELL_MS="$MEAN_DWELL_MS" \
         BASE_SERVICE_MS="$BASE_SERVICE_MS" \
         CAPACITY="$CAPACITY" \
+        taskset -c $CORE_ID \
         ~/prequal/backend >"$LOG" 2>&1 &
 
-    echo "backend $server_id started on :$port (bias=$bias, pid $!), log: $LOG"
+    echo "backend $server_id started on :$port (bias=$bias, core=$CORE_ID, pid $!), log: $LOG"
+    CORE_ID=$((CORE_ID + 1))
 done
