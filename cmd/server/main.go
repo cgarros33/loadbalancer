@@ -90,6 +90,29 @@ func main() {
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	// Reconfigure the LB at runtime (used by the experiment binary between
+	// steps in CloudLab mode, where the LB is not restarted per step).
+	mux.HandleFunc("/reconfigure", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		poolSize := config.ProbePoolSize
+		rateMultiplier := config.ProbeRateMultiplier
+		if v := q.Get("probe_pool_size"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				poolSize = n
+			}
+		}
+		if v := q.Get("probe_rate_multiplier"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+				rateMultiplier = f
+			}
+		}
+		lb.Reconfigure(poolSize, rateMultiplier)
+		logger.Info("reconfigured",
+			slog.Int("probe_pool_size", poolSize),
+			slog.Float64("probe_rate_multiplier", rateMultiplier))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"probe_pool_size":%d,"probe_rate_multiplier":%g}`+"\n", poolSize, rateMultiplier)
+	})
 	mux.Handle("/", lb)
 
 	server := &http.Server{

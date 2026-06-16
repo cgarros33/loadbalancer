@@ -31,22 +31,24 @@ var s2 = math.Sqrt2
 
 // ExperimentA replicates Figure 8 from the Prequal paper:
 // sweep probe rate as a multiple of the query rate at ~1.5× CPU allocation.
-// ProbePoolSize is held fixed at 8; ProbeRateMultiplier varies.
+// ProbePoolSize is held fixed at 16 (paper's default for 100-backend fleet);
+// ProbeRateMultiplier varies.
 func ExperimentA(baseQPS float64) Experiment {
 	multipliers := []float64{4, 2 * s2, 2, s2, 1, 1 / s2, 0.5}
 	steps := make([]Step, len(multipliers))
 	for i, m := range multipliers {
 		steps[i] = Step{
 			Label:               fmt.Sprintf("%.2f", m),
-			ProbePoolSize:       8,
+			ProbePoolSize:       16,
 			ProbeRateMultiplier: m,
 		}
 	}
 	return Experiment{Name: "A", Steps: steps}
 }
 
-// ExperimentB is the original sweep: vary probe pool size at ~75% load.
-// ProbeRateMultiplier is held fixed at 3.0; ProbePoolSize varies.
+// ExperimentB replicates Figure 9 from the Prequal paper:
+// sweep probe pool size with probe rate fixed at 4× (paper's default for
+// the pool-size experiment, well above the knee so the pool is always fresh).
 func ExperimentB() Experiment {
 	sizes := []int{1, 2, 4, 8, 16, 24, 32, 40, 48}
 	steps := make([]Step, len(sizes))
@@ -54,7 +56,7 @@ func ExperimentB() Experiment {
 		steps[i] = Step{
 			Label:               fmt.Sprintf("%d", sz),
 			ProbePoolSize:       sz,
-			ProbeRateMultiplier: 3.0,
+			ProbeRateMultiplier: 4.0,
 		}
 	}
 	return Experiment{Name: "B", Steps: steps}

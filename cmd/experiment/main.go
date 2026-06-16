@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -124,7 +125,24 @@ func main() {
 				slog.String("label", step.Label),
 				slog.Float64("rate_multiplier", step.ProbeRateMultiplier))
 
-			if !*cloudlab {
+			if *cloudlab {
+				// In CloudLab mode the LB is persistent; reconfigure it for
+				// each step so probe rate and pool size actually change.
+				reconfURL := fmt.Sprintf("%s/reconfigure?probe_pool_size=%d&probe_rate_multiplier=%g",
+					ac.url, step.ProbePoolSize, step.ProbeRateMultiplier)
+				resp, err := http.Post(reconfURL, "", nil) //nolint:noctx
+				if err != nil {
+					logger.Error("reconfigure failed", slog.String("url", reconfURL), slog.String("error", err.Error()))
+					os.Exit(1)
+				}
+				resp.Body.Close()
+				logger.Info("reconfigured LB",
+					slog.String("algo", ac.algo),
+					slog.Int("probe_pool_size", step.ProbePoolSize),
+					slog.Float64("probe_rate_multiplier", step.ProbeRateMultiplier))
+				// Let the probe pool repopulate at the new rate before warmup.
+				time.Sleep(3 * time.Second)
+			} else {
 				env := makeEnv(step)
 				if err := experiment.Generate(env); err != nil {
 					logger.Error("compose-gen failed", slog.String("error", err.Error()))

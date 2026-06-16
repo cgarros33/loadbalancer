@@ -52,7 +52,7 @@ BIN_DIR="$REPO_ROOT/bin/linux"
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 NODES_FILE="$SCRIPT_DIR/nodes.txt"
-SSH_USER="$USER"
+SSH_USER="nkoron"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 SEPARATE_LB=true
 LOADGEN_NODE=""
@@ -66,8 +66,8 @@ HOT_BIAS=0.50
 NEUTRAL_BIAS=0.425
 COLD_BIAS=0.3
 MEAN_DWELL_MS=2000
-CAPACITY=10
-BASE_SERVICE_MS=60
+CAPACITY=5
+BASE_SERVICE_MS=150
 PROBE_POOL_SIZE=8
 PROBE_RATE_MULT=3.0
 QRIF=0.84

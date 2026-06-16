@@ -453,17 +453,39 @@ func lowestEffectiveRIF(hot []*poolEntry, erifs []int32, healthy []*poolEntry) *
 	return best
 }
 
+// Reconfigure updates the probe pool size and probe rate multiplier at
+// runtime. The pool is trimmed if the new size is smaller than the current
+// one. Safe to call concurrently with ServeHTTP.
+func (lb *LoadBalancer) Reconfigure(poolSize int, rateMultiplier float64) {
+	lb.mutex.Lock()
+	lb.config.ProbeRateMultiplier = rateMultiplier
+	lb.mutex.Unlock()
+
+	lb.poolMu.Lock()
+	lb.config.ProbePoolSize = poolSize
+	for len(lb.pool) > poolSize {
+		worstIdx := 0
+		for i, e := range lb.pool {
+			if e.rif > lb.pool[worstIdx].rif {
+				worstIdx = i
+			}
+		}
+		lb.pool[worstIdx] = lb.pool[len(lb.pool)-1]
+		lb.pool = lb.pool[:len(lb.pool)-1]
+	}
+	lb.poolMu.Unlock()
+}
+
 func (lb *LoadBalancer) fireProbes() {
 	lb.mutex.RLock()
 	servers := make([]*Server, len(lb.servers))
 	copy(servers, lb.servers)
+	rate := lb.config.ProbeRateMultiplier
 	lb.mutex.RUnlock()
 
 	if len(servers) == 0 {
 		return
 	}
-
-	rate := lb.config.ProbeRateMultiplier
 	whole := int(rate)
 	frac := rate - float64(whole)
 
