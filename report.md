@@ -2,8 +2,8 @@
 
 **Team Members:**  
 Hannah Goldstein (hannah.barbosa@mail.polimi.it);  
-Nico Koron (email address);  
-Celestino Garrós (email address)
+Nico Koron (nicolas.koron@mail.polimi.it);  
+Celestino Garrós (celestino.garros@mail.polimi.it)
 
 ---
 
@@ -300,37 +300,7 @@ would require either an even larger fleet (200+ backends, infeasible on our
 hardware) or a freshly-cleaned host environment with multiple repetitions per data
 point to separate measurement noise from the real effect — both left as future work.
 
-# 6. CloudLab Bare-Metal Evaluation
-
-To address the host resource-contention and CPU oversubscription noise observed during local 100-backend Docker runs (Section 5.2), we reproduced the experiments on a bare-metal CloudLab cluster (using `xl170`-class nodes with 10 physical cores).
-
-## 6.1 Execution and Environment
-- **Bare-Metal Deployment**: We eliminated Docker and its virtualized network layer entirely. Backend processes were packed directly onto CloudLab nodes (e.g., 10 backends per node on incrementing ports), directly sharing physical cores.
-- **Load Generation**: The open-loop load generator ran natively on a separate, dedicated node to eliminate the local Docker host-port relay bottleneck, pointing directly at the LB node's public hostname.
-- **Scale**: The experiments were run against a 100-backend fleet, maintaining the same antagonist load dynamics and query scale (50 QPS/backend).
-
-## 6.2 Experiment A — Probe-Rate Sweep
-
-![CloudLab Experiment A latency](plots/cloudlab/expA_latency.png)
-![CloudLab Experiment A RIF](plots/cloudlab/expA_rif.png)
-
-The bare-metal environment produced remarkably clean validation of the paper's claims without the previous 100-backend noise:
-- **Prequal's p99 latency** remained perfectly stable across the entire probe-rate sweep (4.00x down to 0.50x), fluctuating narrowly between **30.8 ms and 33.4 ms**. 
-- Even when probing at half the rate of incoming requests (0.50x), there was no degradation in tail latency.
-- In stark contrast, **Round Robin's p99 latency** was consistently worse, sitting at **~56-59 ms**. 
-This successfully reproduces the core takeaway of the paper's Figure 8 on real hardware: Prequal drastically reduces tail latency and is highly insensitive to low probe rates.
-
-## 6.3 Experiment B — Probe Pool Size Sweep
-
-![CloudLab Experiment B latency](plots/cloudlab/expB_latency.png)
-![CloudLab Experiment B RIF](plots/cloudlab/expB_rif.png)
-
-Sweeping the probe pool size from 1 to 32 against the 100-backend fleet cleanly demonstrated the "Power of d Choices":
-- **Small pools suffice**: At a minimal pool size of 2 or 4, Prequal's p99 latency immediately dropped to **~31.0-31.8 ms**.
-- **Diminishing returns**: Increasing the pool size beyond 8 (up to 32) yielded zero additional tail latency benefits (staying flat at ~30.7-31.8 ms).
-This confirms the paper's assertion that probing a small, randomized subset of replicas is fully sufficient to achieve optimal load balancing without linearly scaling probe overhead.
-
-# 7. Reproducibility Assessment of the Paper
+# 6. Reproducibility Assessment of the Paper
 
 - **Methodology**: the paper describes the HCL selection rule, probe-pool
   maintenance algorithm, and the probing-rate/pool-size trade-offs in good
@@ -355,7 +325,7 @@ This confirms the paper's assertion that probing a small, randomized subset of r
   sweep step). Reproducing the paper's exact numbers was not attempted, consistent
   with the assignment's framing — only qualitative trends.
 
-# 8. Conclusion
+# 7. Conclusion
 
 - **Experiment A** (Figure 8 replica) qualitatively reproduces the paper's central
   claim: Prequal (HCL + probing) beats Round Robin on tail latency, with the gap
@@ -372,7 +342,6 @@ This confirms the paper's assertion that probing a small, randomized subset of r
   long session of 100-backend runs — a practical lesson that, at this scale, each run
   needs a freshly-cleaned Docker environment and (ideally) multiple repetitions per
   data point, a limitation of our single-run-per-point methodology throughout.
-- **CloudLab Bare-Metal Validation**: Moving the experiment to a bare-metal CloudLab deployment successfully eliminated the Docker-induced noise at the 100-backend scale. The CloudLab results provided definitive, pristine validation of both core claims: Prequal maintained a ~31ms p99 latency even at a 0.5x probe rate (versus RR's ~58ms), and a tiny probe pool size of 2-4 was perfectly sufficient to achieve optimal load distribution.
 - Overall, despite operating at a much smaller scale than the paper's production
   deployment, our reproduction supports both of Prequal's central qualitative claims:
   (1) probe-based RIF/latency-aware selection meaningfully beats Round Robin on tail
