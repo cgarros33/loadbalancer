@@ -271,19 +271,21 @@ than RR from P=8 onward. The **knee is at P=8 (16% of the fleet)**.
 ![100-backend Experiment B latency](plots/100backend/expB_latency.png)
 ![100-backend Experiment B RIF](plots/100backend/expB_rif.png)
 
-**100 backends** (`results_b_100be.csv`): Prequal's p99 decreases **monotonically**
-across the whole sweep, **1898 ms** (P=1) → **567 ms** (P=32), with **no
-flattening by P=32**. RR again stays flat at ≈720–805 ms. Prequal crosses below RR
-around P=8 and reaches ≈25% better than RR by P=32. Errors are modest (Prequal=308,
-RR=2307 total). The curve has not yet reached its knee: **at 100 backends, P=32 is
-only 32% of the fleet**, which is still below the 50-backend knee ratio of 16%×(100/50)=32%,
-consistent with the knee appearing somewhere beyond P=32 for this fleet size.
+**100 backends** (`results_b_100be.csv`): Prequal's p99 falls from **1898 ms** (P=1)
+to a minimum of **506 ms** at P=24, then rises slightly to **567 ms** at P=32. The
+curve is not monotone; it bottoms out around **P=16–24 (16–24% of the fleet)**. RR
+stays flat at ≈720–805 ms. Prequal crosses below RR around P=8 and reaches ≈35%
+better than RR at its P=24 minimum. Errors are modest (Prequal=308, RR=2307 total).
+With only one run per data point we cannot pin the knee precisely, but the data is
+consistent with a knee near **P≈16–24**, close to the same pool-to-fleet ratio (16%)
+seen at 50 backends.
 
-**Headline result for B**: both fleet sizes show a knee — at P=8 for 50 backends and
-beyond P=32 for 100 backends — confirming that it is the **pool-to-fleet ratio**,
-not the absolute pool size, that governs where the latency curve saturates. The
-paper's framing ("the probe pool is a small random subset of replicas") is thus
-supported: the benefit disappears once the pool is large enough to cover the fleet.
+**Headline result for B**: both fleet sizes show a performance knee at a similar
+pool-to-fleet ratio — **P=8 (16%) for 50 backends** and **P≈16–24 (16–24%) for 100
+backends** — confirming that the **pool-to-fleet ratio**, not the absolute pool size,
+governs where the latency curve saturates. The paper's framing ("the probe pool is a
+small random subset of replicas") is thus supported: the benefit disappears once the
+pool covers a substantial fraction of the fleet.
 
 ## 4.5 Why does Prequal show nonzero errors?
 
@@ -319,33 +321,31 @@ different fleet sizes:
 **Finding**: both fleet sizes show a performance knee, but at different absolute pool
 sizes consistent with a similar underlying pool-to-fleet ratio:
 
-| Fleet size | Knee location | Pool/fleet at knee | Prequal p99 at P=8→32 |
-|---|---|---|---|
-| 50 backends  | P≈8 | 16% | flat (460→450 ms) |
-| 100 backends | beyond P=32 | >32% | still decreasing (720→567 ms) |
+| Fleet size | Knee location | Pool/fleet at knee | p99 at knee | p99 at P=32 |
+|---|---|---|---|---|
+| 50 backends  | P≈8 | 16% | 460 ms | 450 ms (flat) |
+| 100 backends | P≈16–24 | 16–24% | 506 ms (at P=24) | 567 ms (+12%, noisy) |
 
-The 50-backend curve has already saturated well before P=32; the 100-backend curve
-has not yet saturated at P=32. This is consistent with our hypothesis: a pool-size
-sweep against a 50-backend fleet reaches the "near-full-visibility" regime much
-sooner (in absolute P) than the same sweep against 100 backends.
+Both fleet sizes show a knee at a similar pool-to-fleet ratio (~16%), supporting
+the hypothesis. The 100-backend minimum is at P=24 with P=32 slightly noisily
+higher, suggesting the curve has already turned at P=24 or thereabouts — it did
+not keep improving all the way to P=32 as we initially described.
 
-To confirm the 100-backend knee directly, we extended the sweep to
-`{1, 2, 4, 8, 16, 24, 32, 40, 48}` at 100 backends (`results_b_100be_extended.csv`),
-aiming to observe flattening around P=40–48 (40–48% of fleet). This run was too
-noisy to use: total errors jumped to **22,286** (vs 2,615 for the same P=1–32 range
-in `results_b_100be.csv`), including for Round Robin — which doesn't use the pool
-for selection and whose error rate should therefore be independent of P. Since even
-RR's error rate roughly tripled, this points to accumulated Docker host resource
-pressure after many back-to-back 100-backend runs (≈70 GB of images/build cache, on
-top of the already-severe 8.3x CPU oversubscription). We cannot use this data to
-locate the exact elbow.
+To look for the knee more precisely, we extended the sweep to
+`{1, 2, 4, 8, 16, 24, 32, 40, 48}` at 100 backends (`results_b_100be_extended.csv`).
+This run was too noisy to use: total errors jumped to **22,286** (vs 2,615 for the
+same P=1–32 range in `results_b_100be.csv`), including for Round Robin — which
+doesn't use the pool and whose error rate should therefore be independent of P.
+Since even RR's error rate roughly tripled, this points to accumulated Docker host
+resource pressure after many back-to-back 100-backend runs (≈70 GB of images/build
+cache, on top of the already-severe 8.3x CPU oversubscription). We cannot use this
+data to refine the elbow location.
 
-**Summary**: our data does confirm that **different "knees" exist** — the 50-backend
-and 100-backend curves flatten at different pool sizes — supporting the paper's
-design assumption that the pool should remain a small fraction of the fleet.
-Pinning down the 100-backend knee precisely would require either a larger fleet or a
-freshly-cleaned host environment with multiple repetitions per data point; both are
-left as future work.
+**Summary**: both fleet sizes have measurably different knees at a similar
+pool-to-fleet ratio (~16%), supporting the paper's design assumption that the probe
+pool should remain a small fraction of the fleet. Pinning the 100-backend knee
+precisely would require a cleanly-reprovisioned environment with multiple repetitions
+per data point; this is left as future work (and is a candidate CloudLab experiment).
 
 # 6. Reproducibility Assessment of the Paper
 
@@ -380,11 +380,11 @@ left as future work.
   p99 ≈30–40% worse), and both algorithms' error rates rise once the probe rate drops
   below ≈1x the query rate — exactly the threshold the paper identifies.
 - **Experiment B** demonstrates that Prequal's p99 improves with probe pool size and
-  that the **knee falls at different pool sizes** for different fleet sizes: at 50
-  backends the curve flattens by P=8 (16% of fleet), while at 100 backends it keeps
-  improving through P=32 (32% of fleet). We directly observe two different knees —
-  one per fleet size — consistent with the paper's framing that the probe pool should
-  be "a small random subset of replicas."
+  that the **knee falls at a similar pool-to-fleet ratio** regardless of fleet size:
+  at 50 backends the curve flattens by P=8 (16% of fleet), and at 100 backends the
+  minimum is at P=24 (24% of fleet) with P=32 noisily higher — both knees fall in
+  the 16–24% range. This is consistent with the paper's framing that the probe pool
+  should be "a small random subset of replicas."
 - Our further-exploration attempt to push the 100-backend curve past its knee
   (P up to 48) was inconclusive due to host resource-contention noise accumulated
   over a long session of 100-backend runs — a practical lesson that, at this scale,
