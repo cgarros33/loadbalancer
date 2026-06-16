@@ -2,8 +2,15 @@
 # First line is treated as the LB node when --separate-lb is set (default).
 # When --no-separate-lb, node0 runs both LB and one backend.
 #
-# Example (Utah xl170 cluster):
+# Example (11 nodes: 1 LB + 10 backends, Utah xl170 cluster):
 node0.myexperiment.myproject.utah.cloudlab.us
 node1.myexperiment.myproject.utah.cloudlab.us
 node2.myexperiment.myproject.utah.cloudlab.us
 node3.myexperiment.myproject.utah.cloudlab.us
+node4.myexperiment.myproject.utah.cloudlab.us
+node5.myexperiment.myproject.utah.cloudlab.us
+node6.myexperiment.myproject.utah.cloudlab.us
+node7.myexperiment.myproject.utah.cloudlab.us
+node8.myexperiment.myproject.utah.cloudlab.us
+node9.myexperiment.myproject.utah.cloudlab.us
+node10.myexperiment.myproject.utah.cloudlab.us
