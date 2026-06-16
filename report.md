@@ -164,9 +164,10 @@ Experiment-specific:
   "~1.5x allocation, worst case" only during occasional ceiling excursions, rather
   than as a permanent condition (an earlier, harsher calibration made *every* step
   collapse to 40–68% errors — see comments in `scripts/run_experiment_a.sh`).
-- **Probe pool eviction.** The paper's pool periodically evicts its *worst* probe
-  (by RIF); our implementation evicts the *oldest* probe on overflow, a
-  simplification (`pkg/loadbalancer/balancer.go`, `updatePool`).
+- **Probe pool eviction.** The paper's pool evicts the entry with the highest RIF
+  when the pool is full, keeping the pool biased toward the least-loaded known
+  servers. Our implementation matches this policy (`pkg/loadbalancer/balancer.go`,
+  `updatePool`).
 
 # 4. Experiment Result
 

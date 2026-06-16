@@ -131,7 +131,8 @@ func (lb *LoadBalancer) probeWorker() {
 }
 
 // updatePool inserts or refreshes a server's entry in the bounded probe pool.
-// If the pool is at capacity, the oldest entry is evicted.
+// If the pool is at capacity, the entry with the highest RIF is evicted,
+// keeping the pool biased toward the least-loaded known servers (paper §5).
 func (lb *LoadBalancer) updatePool(server *Server, result *ProbeResult) {
 	lb.poolMu.Lock()
 	defer lb.poolMu.Unlock()
@@ -159,14 +160,15 @@ func (lb *LoadBalancer) updatePool(server *Server, result *ProbeResult) {
 		return
 	}
 
-	// Evict oldest entry
-	oldestIdx := 0
+	// Evict the entry with the highest RIF (paper's policy: keep the
+	// least-loaded servers in the pool, bias toward cold backends).
+	worstIdx := 0
 	for i, entry := range lb.pool {
-		if entry.updatedAt.Before(lb.pool[oldestIdx].updatedAt) {
-			oldestIdx = i
+		if entry.rif > lb.pool[worstIdx].rif {
+			worstIdx = i
 		}
 	}
-	lb.pool[oldestIdx] = newEntry
+	lb.pool[worstIdx] = newEntry
 }
 
 // StartProbing warms the pool synchronously so the first request has
