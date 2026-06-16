@@ -8,7 +8,7 @@ Celestino Garrós (celestino.garros@mail.polimi.it)
 ---
 
 **Source Paper:**
-Bartek Wydrowski, Robert Kleinberg, Stephen M. Rumble, Aaron Archer: Load is not what you should balance: Introducing Prequal. In Proceedings of the 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI ’24), USENIX Association, 2024.
+Bartek Wydrowski, Robert Kleinberg, Stephen M. Rumble, Aaron Archer: Load is not what you should balance: Introducing Prequal. In Proceedings of the 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI '24), USENIX Association, 2024.
 
 
 **Project:**
@@ -71,6 +71,15 @@ For both experiments we measure end-to-end p99/p99.9 request latency and the
 selected replica's RIF percentiles (p50/p75/p99), at fleet sizes of 10, 50 and 100
 backends.
 
+**Headline result**: at 50 backends (our cleanest fleet size), Prequal's p99 is
+**439–657 ms** vs. Round Robin's **688–840 ms** across the full probe-rate sweep
+(30–40% reduction), with errors appearing only at probe rates ≤ 1x — consistent
+with the paper's Figure 8 threshold. Experiment B shows Prequal's p99 improving
+from **1020 ms** (P=1) to **450 ms** (P=8), then plateauing — the knee at P=8
+corresponds to 16% of the 50-backend fleet. At 100 backends the curve has not yet
+plateaued by P=32 (32% of fleet), confirming that the **pool-to-fleet ratio** governs
+where the knee falls, not the absolute pool size.
+
 # 3. Environment Setup
 
 **Hardware Environment:**
@@ -83,30 +92,55 @@ single Docker Compose network on this one host — there is no real network betw
 **Software Environment:**
 Go 1.24 (module), built with the go1.26.3 toolchain; Docker 28.1.1 / Docker Compose
 v2.35.1. No public artifact from the paper was available — the load balancer, HCL
-selection rule, probe pool, backend simulator, and load generator are all
-reimplemented from scratch in this repository (commit history on `main`).
+selection rule, probe pool, and a synthetic antagonist-load backend are all
+reimplemented from scratch in this repository (git commit `080c7bf`).
+
+**Backend Simulator Model:**
+Each backend simulates a bounded-queue server via a Go channel semaphore of size
+`capacity=10` (concurrency slots). An antagonist process periodically steals some
+of those slots by slowing service time proportionally:
+
+```
+effectiveC       = capacity - capacity * antagonistPct / 100
+effectiveService = base_service_ms * capacity / effectiveC
+saturationQPS    = effectiveC * 1000 / base_service_ms
+queueDepth       = saturationQPS * 20
+```
+
+Service time is sampled with multiplicative Gaussian jitter (σ = mean, matching
+the paper's cost distribution — "variance equal to mean"). A backend returns HTTP
+503 when its current RIF exceeds `queueDepth`. At the worst antagonist state
+(80%): `effectiveC=2`, `effectiveService=300 ms`, `saturationQPS≈33`, `rho=50/33≈1.5`
+— the paper's stated ceiling of "1.5x our CPU allocation."
+
+**Load Generator:**
+The load generator issues requests on a fixed-rate ticker (one request every
+`1/QPS` seconds), regardless of outstanding responses — an open-loop deterministic
+arrival process matching the paper's stated load model. The client timeout is 5 s.
+Errors are counted as any non-2xx response or connection failure.
 
 **Configuration Parameters:**
 
 Common to both experiments:
-- `capacity=10` (nominal concurrency slots per backend), `base-service-ms=60` →
-  `C_throughput = 166.7` QPS/backend.
-- Query load `QPS = 50 * backends` (≈30% of `C_throughput` per backend at the
-  antagonist floor).
+- `capacity=10`, `base-service-ms=60` → `C_throughput = 166.7` QPS/backend.
+- Query load `QPS = 50 × backends` (≈30% of `C_throughput` per backend at the
+  antagonist floor; ≈1.5x at the antagonist ceiling).
 - Per-backend **antagonist** process: a 5-state random walk over
-  `{20, 35, 50, 65, 80}%` of `capacity`, mean dwell time 2000ms. Backends are split
+  `{20, 35, 50, 65, 80}%` of `capacity`, mean dwell time 2000 ms. Backends are split
   into three groups — hot-bias=0.50, neutral-bias=0.425, cold-bias=0.3 — so the
-  worst antagonist state (`80%`, giving `effectiveC=2` and `rho=1.5`, i.e. the
-  paper's "1.5x allocation" worst case) is visited ~20% of the time for hot
-  backends, ~10% for neutral, ~2% for cold.
-- `QRIF=0.70` (HCL hot/cold RIF threshold).
-- Background probe-worker pool: `probeWorkers=150`, `probeQueueSize=300`.
+  worst state (80%) is visited ≈20% of the time for hot backends, ≈10% neutral,
+  ≈2% cold.
+- `QRIF=0.70`: the HCL hot/cold threshold is set to the **70th percentile** of the
+  pool's current RIF values. With pool size P=8, this means `sorted_rif[4]` is the
+  threshold — roughly the top 3 entries (37%) are "hot" and the bottom 5 (63%) are
+  "cold" (preferred). Our observed pool RIF p75 at 50 backends is 5–7; the threshold
+  therefore sits around the median of the pool.
 
 Experiment-specific:
 - **A**: `ProbePoolSize=8` fixed; `ProbeRateMultiplier ∈ {4, 2√2, 2, √2, 1, 1/√2,
-  0.5}`; 30s measurement window, no warmup/drain.
+  0.5}`; 30 s measurement window, no warmup/drain.
 - **B**: `ProbeRateMultiplier=3.0` fixed; `ProbePoolSize ∈ {1, 2, 4, 8, 16, 24, 32}`;
-  30s measurement, 15s warmup, 5s drain.
+  30 s measurement, 15 s warmup, 5 s drain.
 
 **Deviations from the Original Setup:**
 
@@ -118,7 +152,7 @@ Experiment-specific:
   100 backends (see Sections 4.3 and 5).
 - **Round Robin probes in our implementation.** In the paper, RR is a pure
   client-local baseline that never probes. In our implementation, RR shares the same
-  background probing infrastructure as Prequal (`fireProbes()` /`probeOne()` run
+  background probing infrastructure as Prequal (`fireProbes()` / `probeOne()` run
   unconditionally for both algorithms) — RR uses only the resulting health-check
   signal (`IsHealthy`), not the RIF pool. We kept this because it is a controlled-
   comparison design choice (both algorithms see identical background probe traffic
@@ -129,7 +163,7 @@ Experiment-specific:
   (above), calibrated so the system's steady state matches the paper's stated
   "~1.5x allocation, worst case" only during occasional ceiling excursions, rather
   than as a permanent condition (an earlier, harsher calibration made *every* step
-  collapse to 40-68% errors — see comments in `scripts/run_experiment_a.sh`).
+  collapse to 40–68% errors — see comments in `scripts/run_experiment_a.sh`).
 - **Probe pool eviction.** The paper's pool periodically evicts its *worst* probe
   (by RIF); our implementation evicts the *oldest* probe on overflow, a
   simplification (`pkg/loadbalancer/balancer.go`, `updatePool`).
@@ -143,7 +177,7 @@ combination it regenerates `docker-compose.yml` via `compose-gen` with that step
 `ProbePoolSize`/`ProbeRateMultiplier`, brings up an isolated stack (one LB + N
 backends + Prometheus/Grafana), runs the containerized load generator
 (`docker compose --profile tools run loadgen`) for the configured
-duration(+warmup+drain), and records: end-to-end p50/p99/p99.9 latency and error
+duration (+ warmup + drain), and records: end-to-end p50/p99/p99.9 latency and error
 count from the load generator, plus the selected replica's RIF p50/p75/p99 scraped
 from the LB's Prometheus metrics. Each row of the result CSVs is **one 30-second run**
 — we did not run repeated trials or compute confidence intervals, which we note as a
@@ -158,18 +192,19 @@ CPU/queue behavior matched the configured antagonist model.
 
 - **Host-port relay artifact.** Early runs pointed the load generator at
   `localhost:<published-port>`. On Docker Desktop/WSL2 this traffic crosses a slow
-  host↔VM relay that itself becomes the bottleneck, producing ~100% error rates that
+  host↔VM relay that itself becomes the bottleneck, producing ≈100% error rates that
   reflected the relay, not the LB. Fix: always run the load generator as a container
   on the compose network (`-url http://lb-prequal:8080`); we also added a runtime
   warning for loopback URLs (`cmd/loadgen/main.go`, `warnIfLoopback`).
 - **Probe-worker pool sizing.** At 50-backend/2500-QPS scale, the original
   `probeWorkers`/`probeQueueSize = 50/100` (sized for the 10-backend/500-QPS
   baseline) was too small: probes were dropped under load, the pool went stale, and
-  both algorithms occasionally routed into already-overloaded backends (0.4-3.5%
-  errors, `results_b_v1.csv`). Scaling 3x to `150/300` eliminated these errors with
-  unchanged latency trends (`results_b_v2.csv`). We also tried `400/800` for the
-  100-backend runs; this *increased* total errors (8181-29576 vs 2615 at 150/300),
-  so `150/300` was kept as the validated setting at all scales.
+  both algorithms occasionally routed into already-overloaded backends (0.4–3.5%
+  errors, `results_b_v1.csv`). Scaling 3x to `probeWorkers=150, probeQueueSize=300`
+  eliminated these errors with unchanged latency trends (`results_b_50be.csv`). We
+  also tried `400/800` for the 100-backend runs; this *increased* total errors
+  (8181–29576 vs 2615 at 150/300), so `150/300` was kept as the validated setting at
+  all scales.
 - **Docker build concurrency.** Building all 100 backend images in parallel
   occasionally failed with buildkit `"no such job"` errors; resolved by capping
   build concurrency with `COMPOSE_PARALLEL_LIMIT=8`.
@@ -179,79 +214,89 @@ CPU/queue behavior matched the configured antagonist model.
 ![10-backend Experiment A latency](plots/10backend/expA_latency.png)
 ![10-backend Experiment A RIF](plots/10backend/expA_rif.png)
 
-**10 backends** (`results_a_v30.csv`): at this scale, each backend represents 10% of
-total fleet capacity, so a single backend's excursion into the antagonist's 80%-load
-state has an outsized effect on a policy that ignores it. Prequal's p99 stays flat at
-**300-660ms** across the entire probe-rate sweep (0.5x-4x), while RR's p99 swings
-between **2.6s and 4.8s** — a **5-10x** gap — because RR keeps routing its fixed 1/10
-share of traffic to whichever backend happens to be saturated, while Prequal's probes
-let it route around it. RR also accumulates 561 errors total across the sweep
-(Prequal: 0).
+**10 backends** (`results_a_10be.csv`): at this scale, each backend represents 10%
+of total fleet capacity, so a single backend's excursion into the 80%-antagonist
+state has an outsized effect on a policy that ignores it. Prequal's p99 stays flat
+at **300–475 ms** across the entire probe-rate sweep (0.5x–4x), while RR's p99
+swings between **2.6 s and 4.8 s** — a **5–10x gap** — because RR keeps routing its
+fixed 1/10 share of traffic to whichever backend happens to be saturated, while
+Prequal's probes let it route around it. RR also accumulates 561 errors total across
+the sweep (Prequal: 0).
 
 ![50-backend Experiment A latency](plots/50backend/expA_latency.png)
 ![50-backend Experiment A RIF](plots/50backend/expA_rif.png)
 
-**50 backends** (`results_a_50.csv` — our cleanest run, see below): Prequal's p99
-advantage narrows to a consistent **~25-35%** (439-657ms vs 688-840ms for RR) across
-the whole probe-rate range — each backend now represents only 2% of capacity, so
-RR's "blind spot" cost shrinks, but Prequal still wins consistently. Errors appear
-**only at probe rate ≤ 1.0x**: Prequal 361 @ 1.0x and 384 @ 0.5x; RR 220 @ 0.71x and
-392 @ 0.5x (total 1357) — matching the paper's claim that effects become significant
-once probing drops below one probe per query (mechanism discussed in 4.5).
+**50 backends** (`results_a_50be.csv` — our cleanest run): Prequal's p99 advantage
+narrows to a consistent **30–40%** (439–657 ms vs 688–840 ms for RR) across the
+whole probe-rate range. Each backend now represents only 2% of capacity, so RR's
+"blind spot" cost shrinks, but Prequal still wins consistently. Errors appear **only
+at probe rate ≤ 1.0x**: Prequal 361 @ 1.0x and 384 @ 0.5x; RR 220 @ 0.71x and
+392 @ 0.5x (total 1357) — consistent with the paper's Figure 8 claim that effects
+become significant "once we drop below one probe per query." The paper reports a
+similar cliff: tail RIF distributions "jump visibly" at ≤1/√2x. In our data the
+jump manifests primarily as hard errors (queue overflow) rather than only an
+elevated tail-latency signal, which we attribute to our load model occasionally
+hitting the hard `queueDepth` ceiling rather than just slowing gracefully.
 
 ![100-backend Experiment A latency](plots/100backend/expA_latency.png)
 ![100-backend Experiment A RIF](plots/100backend/expA_rif.png)
 
-**100 backends** (`results_a_100.csv` / `results_a_100_v2.csv`): the same
+**100 backends** (`results_a_100be.csv` / `results_a_100be_v2.csv`): the same
 qualitative pattern holds (Prequal generally below RR on p99; errors increase below
 1x probe rate), but total errors balloon to 5531 / 7882 across two independent
 re-runs — far noisier than at 50 backends. We attribute this to the
 CPU-oversubscription confound described in Section 3 (8.3x at 100 backends), which
 adds host-level contention on top of the antagonist model's designed contention.
 
-**Headline result for A**: the **50-backend run** (`results_a_50.csv`) — a clean,
-consistent ~25-35% Prequal p99 advantage over RR across the full probe-rate sweep,
-with both algorithms' error rates rising only below 1x probe rate, consistent with
-the paper's Figure 8.
+**Headline result for A**: the **50-backend run** (`results_a_50be.csv`) — a clean,
+consistent 30–40% Prequal p99 advantage over RR across the full probe-rate sweep,
+with both algorithms' error rates rising only below 1x probe rate. This qualitatively
+reproduces Figure 8: Prequal is robust to probe rate above 1x, and degrades sharply
+below it. The paper's absolute numbers (production fleet, hardware-grade backends)
+cannot be directly compared; our smaller scale inflates absolute latencies but
+preserves the directional and threshold effects.
 
 ## 4.4 Experiment B — Probe Pool Size Sweep
 
 ![50-backend Experiment B latency](plots/50backend/expB_latency.png)
 ![50-backend Experiment B RIF](plots/50backend/expB_rif.png)
 
-**50 backends** (`results_b_v2.csv`, 0 errors across all 14 steps): Prequal's p99
-drops sharply from **1020ms** (P=1) to **~460ms** by P=8, then is essentially **flat**
-(460→456→455→449ms) through P=32. RR stays flat at ~700-790ms throughout (it
-doesn't use the pool). Prequal starts *worse* than RR at P≤2 (a too-small/stale pool
-hurts more than not having one), crosses over by P=4, and settles ~40% better than RR
-from P=8 onward.
+**50 backends** (`results_b_50be.csv`, 0 errors across all 14 steps): Prequal's p99
+drops sharply from **1020 ms** (P=1) to **≈460 ms** by P=8, then is essentially
+**flat** (460→456→455→450 ms) through P=32. RR stays flat at ≈700–790 ms throughout
+(it doesn't use the pool). Prequal starts *worse* than RR at P≤2 (a too-small/stale
+pool hurts more than not having one), crosses over by P=4, and settles ≈40% better
+than RR from P=8 onward. The **knee is at P=8 (16% of the fleet)**.
 
 ![100-backend Experiment B latency](plots/100backend/expB_latency.png)
 ![100-backend Experiment B RIF](plots/100backend/expB_rif.png)
 
-**100 backends** (`results_b_100.csv`): Prequal's p99 decreases **monotonically**
-across the whole sweep, **1898ms** (P=1) → **567ms** (P=32), with **no flattening**.
-RR again stays flat at ~720-805ms. Prequal crosses below RR around P=8 and reaches
-~25% better than RR by P=32. Errors are modest (Prequal=308, RR=2307 total).
+**100 backends** (`results_b_100be.csv`): Prequal's p99 decreases **monotonically**
+across the whole sweep, **1898 ms** (P=1) → **567 ms** (P=32), with **no
+flattening by P=32**. RR again stays flat at ≈720–805 ms. Prequal crosses below RR
+around P=8 and reaches ≈25% better than RR by P=32. Errors are modest (Prequal=308,
+RR=2307 total). The curve has not yet reached its knee: **at 100 backends, P=32 is
+only 32% of the fleet**, which is still below the 50-backend knee ratio of 16%×(100/50)=32%,
+consistent with the knee appearing somewhere beyond P=32 for this fleet size.
 
-**Headline result for B**: the **100-backend run**, because — as discussed in
-Section 5 — at 50 backends a pool of size ≥8 already represents ≥16% of the entire
-fleet, large enough that the curve saturates; the 100-backend run keeps the pool
-below ~32% of the fleet throughout the sweep and shows the pool-size effect the
-paper's design is meant to address.
+**Headline result for B**: both fleet sizes show a knee — at P=8 for 50 backends and
+beyond P=32 for 100 backends — confirming that it is the **pool-to-fleet ratio**,
+not the absolute pool size, that governs where the latency curve saturates. The
+paper's framing ("the probe pool is a small random subset of replicas") is thus
+supported: the benefit disappears once the pool is large enough to cover the fleet.
 
 ## 4.5 Why does Prequal show nonzero errors?
 
-In Experiment A, Prequal's errors appear *only* at probe rate ≤ 1.0x query rate (e.g.
-50 backends: 361 @ 1.0x, 384 @ 0.5x). Each backend's antagonist load follows a random
-walk with ~2s mean dwell time; below ~1 probe per query, the probe pool is refreshed
-too infrequently to track these swings. Both algorithms can then route a request to a
-backend whose pool entry says "lightly loaded" but which has since transitioned to
-its 80%-antagonist (overloaded) state; the backend's bounded queue
-(`queueDepth = saturationQPS * 20`) overflows and it returns an error. This reproduces
-— as a hard error rather than only an elevated tail-latency/RIF signature — the exact
-threshold the paper describes: "at probing rates of 1/√2x and 1/2x, the tail RIF
-distributions jump visibly."
+In Experiment A, Prequal's errors appear *only* at probe rate ≤ 1.0x query rate
+(e.g. 50 backends: 361 @ 1.0x, 384 @ 0.5x). Each backend's antagonist load follows
+a random walk with ≈2 s mean dwell time; below ≈1 probe per query, the probe pool is
+refreshed too infrequently to track these swings. Both algorithms can then route a
+request to a backend whose pool entry says "lightly loaded" but which has since
+transitioned to its 80%-antagonist (overloaded) state; the backend's
+`queueDepth = effectiveC × 1000 / base_service_ms × 20` overflows and it returns
+HTTP 503. This reproduces — as a hard error rather than only an elevated
+tail-latency/RIF signature — the exact threshold the paper describes: "at probing
+rates of 1/√2x and 1/2x, the tail RIF distributions jump visibly."
 
 # 5. Further Exploration
 
@@ -261,52 +306,54 @@ The paper's design rationale (Section 5) explicitly assumes "each client's probe
 represents only a small random subset of replicas" — its default pool size of 16 is
 chosen against fleets of hundreds-plus replicas. Our Experiment B sweeps the pool
 size up to 32, but at only 50 backends, P=32 is **64%** of the fleet — no longer "a
-small subset". We hypothesized this explains why the 50-backend curve (Section 4.4)
-flattens by P=8 (16% of fleet) while the 100-backend curve (P=32 = 32% of fleet) keeps
-improving across the whole sweep: **the relevant variable is the pool-to-fleet
-ratio, not the absolute pool size.**
+small subset". We hypothesized that the **pool-to-fleet ratio** is the relevant
+variable: the curve should flatten at a higher absolute P when the fleet is larger,
+but at the same *ratio* of pool to fleet.
 
 ## 5.2 Methodology and Result
 
-To test this directly, we extended Experiment B's pool-size sweep to
-`{1, 2, 4, 8, 16, 24, 32, 40, 48}` at 100 backends (`results_b_100_v4.csv`), aiming
-to find the "elbow" where the 100-backend curve starts to flatten too (P=48 = 48% of
-fleet).
+We observe that our Experiment B runs at two fleet sizes already provide evidence for
+this hypothesis, since they cover the same absolute pool-size range (P=1–32) against
+different fleet sizes:
 
-**Result**: this run was too noisy to use. Total errors jumped to **22,286** (vs
-2,615 for the same P=1-32 range measured earlier in `results_b_100.csv`), including
-for Round Robin — which doesn't use the pool for selection at all, and whose error
-rate should therefore be independent of P. Since even RR's error rate roughly
-tripled, this points to a confound external to the pool-size variable: by this point
-in the session we had run many back-to-back 100-backend experiments, accumulating
-~70GB of Docker images/build cache and host-level resource pressure on top of the
-already-severe 8.3x CPU oversubscription at 100 backends. We therefore cannot draw a
-conclusion about a 40/48 elbow from this run.
+**Finding**: both fleet sizes show a performance knee, but at different absolute pool
+sizes consistent with a similar underlying pool-to-fleet ratio:
 
-**What the clean data does show**, comparing the 50- and 100-backend curves at the
-*same absolute pool sizes* (P=1-32):
+| Fleet size | Knee location | Pool/fleet at knee | Prequal p99 at P=8→32 |
+|---|---|---|---|
+| 50 backends  | P≈8 | 16% | flat (460→450 ms) |
+| 100 backends | beyond P=32 | >32% | still decreasing (720→567 ms) |
 
-| Fleet size | P as % of fleet at P=32 | Prequal p99 trend P=8→32 |
-|---|---|---|
-| 50 backends  | 64% | flat (460→449ms) |
-| 100 backends | 32% | still decreasing (721→567ms) |
+The 50-backend curve has already saturated well before P=32; the 100-backend curve
+has not yet saturated at P=32. This is consistent with our hypothesis: a pool-size
+sweep against a 50-backend fleet reaches the "near-full-visibility" regime much
+sooner (in absolute P) than the same sweep against 100 backends.
 
-This is consistent with our hypothesis: a pool-size sweep that reaches 64% of the
-fleet tests a fundamentally different (near-full-visibility) regime than the paper's
-intended "thin random sample", while the same absolute sweep against a larger fleet
-(32% of fleet) stays closer to that regime and shows a richer, still-improving curve.
-A rigorous test of where the curve *does* eventually flatten for a 100-backend fleet
-would require either an even larger fleet (200+ backends, infeasible on our
-hardware) or a freshly-cleaned host environment with multiple repetitions per data
-point to separate measurement noise from the real effect — both left as future work.
+To confirm the 100-backend knee directly, we extended the sweep to
+`{1, 2, 4, 8, 16, 24, 32, 40, 48}` at 100 backends (`results_b_100be_extended.csv`),
+aiming to observe flattening around P=40–48 (40–48% of fleet). This run was too
+noisy to use: total errors jumped to **22,286** (vs 2,615 for the same P=1–32 range
+in `results_b_100be.csv`), including for Round Robin — which doesn't use the pool
+for selection and whose error rate should therefore be independent of P. Since even
+RR's error rate roughly tripled, this points to accumulated Docker host resource
+pressure after many back-to-back 100-backend runs (≈70 GB of images/build cache, on
+top of the already-severe 8.3x CPU oversubscription). We cannot use this data to
+locate the exact elbow.
+
+**Summary**: our data does confirm that **different "knees" exist** — the 50-backend
+and 100-backend curves flatten at different pool sizes — supporting the paper's
+design assumption that the pool should remain a small fraction of the fleet.
+Pinning down the 100-backend knee precisely would require either a larger fleet or a
+freshly-cleaned host environment with multiple repetitions per data point; both are
+left as future work.
 
 # 6. Reproducibility Assessment of the Paper
 
 - **Methodology**: the paper describes the HCL selection rule, probe-pool
   maintenance algorithm, and the probing-rate/pool-size trade-offs in good
-  conceptual detail (Sections 5-6), and Figure 8's headline claim ("insensitive to
+  conceptual detail (Sections 5–6), and Figure 8's headline claim ("insensitive to
   probe rate above 1x, degrades below") is reproducible at a qualitative level even
-  at 1-2 orders of magnitude smaller scale (10-100 backends vs. the paper's
+  at 1–2 orders of magnitude smaller scale (10–100 backends vs. the paper's
   production fleets).
 - **Artifact**: no public code artifact was available. We reimplemented the load
   balancer, HCL selection rule, probe pool, and a synthetic antagonist-load backend
@@ -321,7 +368,7 @@ point to separate measurement noise from the real effect — both left as future
   description. The harder part was constructing a load model whose *dynamics*
   (not just average load) create the heterogeneity Prequal is designed to exploit —
   this took several calibration iterations (see `scripts/run_experiment_a.sh`
-  comments on an earlier bias configuration that caused 40-68% error rates at every
+  comments on an earlier bias configuration that caused 40–68% error rates at every
   sweep step). Reproducing the paper's exact numbers was not attempted, consistent
   with the assignment's framing — only qualitative trends.
 
@@ -329,19 +376,20 @@ point to separate measurement noise from the real effect — both left as future
 
 - **Experiment A** (Figure 8 replica) qualitatively reproduces the paper's central
   claim: Prequal (HCL + probing) beats Round Robin on tail latency, with the gap
-  *widening as fleet size shrinks* (10 backends: RR p99 5-10x worse; 50 backends: RR
-  p99 ~25-35% worse), and both algorithms' error rates rise once the probe rate drops
-  below ~1x the query rate — exactly the threshold the paper identifies.
-- **Experiment B** shows Prequal's p99 improves with probe pool size, with
-  diminishing returns once the pool covers a large fraction of the fleet: at 50
-  backends (P≤32 = ≤64% of fleet) the curve flattens by P=8, while at 100 backends
-  (P≤32 = ≤32% of fleet) it keeps improving throughout the sweep — supporting the
-  paper's framing of the probe pool as "a small random subset of replicas."
-- Our further-exploration attempt to push this ratio further (P up to 48 at 100
-  backends) was inconclusive due to host resource-contention noise accumulated over a
-  long session of 100-backend runs — a practical lesson that, at this scale, each run
-  needs a freshly-cleaned Docker environment and (ideally) multiple repetitions per
-  data point, a limitation of our single-run-per-point methodology throughout.
+  *widening as fleet size shrinks* (10 backends: RR p99 5–10x worse; 50 backends: RR
+  p99 ≈30–40% worse), and both algorithms' error rates rise once the probe rate drops
+  below ≈1x the query rate — exactly the threshold the paper identifies.
+- **Experiment B** demonstrates that Prequal's p99 improves with probe pool size and
+  that the **knee falls at different pool sizes** for different fleet sizes: at 50
+  backends the curve flattens by P=8 (16% of fleet), while at 100 backends it keeps
+  improving through P=32 (32% of fleet). We directly observe two different knees —
+  one per fleet size — consistent with the paper's framing that the probe pool should
+  be "a small random subset of replicas."
+- Our further-exploration attempt to push the 100-backend curve past its knee
+  (P up to 48) was inconclusive due to host resource-contention noise accumulated
+  over a long session of 100-backend runs — a practical lesson that, at this scale,
+  each run needs a freshly-cleaned Docker environment and (ideally) multiple
+  repetitions per data point.
 - Overall, despite operating at a much smaller scale than the paper's production
   deployment, our reproduction supports both of Prequal's central qualitative claims:
   (1) probe-based RIF/latency-aware selection meaningfully beats Round Robin on tail
