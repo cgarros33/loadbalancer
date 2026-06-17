@@ -300,7 +300,7 @@ hitting the hard `queueDepth` ceiling rather than just slowing gracefully.
 **100 backends** (`results_a_100be.csv` / `results_a_100be_v2.csv`): results at
 this scale are dominated by the 8.3x CPU-oversubscription confound (Section 3.1) —
 total errors of 5531 / 7882 across two re-runs indicate the host is saturated
-independently of algorithm behavior. We do not draw conclusions from this data.
+independently of algorithm behavior. **We do not draw conclusions from this data**.
 
 **Headline result for A**: the **50-backend run** (`results_a_50be.csv`) — a clean,
 consistent 30–40% Prequal p99 advantage over RR across the full probe-rate sweep,
