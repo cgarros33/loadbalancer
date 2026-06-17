@@ -146,21 +146,23 @@ Common to both experiments:
   into three groups — hot-bias=0.50, neutral-bias=0.425, cold-bias=0.3 — so the
   worst state (80%) is visited ≈20% of the time for hot backends, ≈10% neutral,
   ≈2% cold.
-- `QRIF=0.84`: the HCL hot/cold threshold is set to the **84th percentile** of the
-  pool's current RIF values (the paper's default is 0.70; see Deviations below). With
-  the paper's default pool size P=16 (used in CloudLab runs and Docker Experiment B),
-  this means `sorted_rif[13]` is the threshold — the top 2–3 entries are "hot" and
-  the bottom 13–14 are "cold" (preferred). Docker Experiment A used P=8, where
-  `sorted_rif[6]` is the threshold (top 2 hot, bottom 6 cold).
 
 Experiment-specific (Docker runs):
+- `QRIF=0.70` (paper default; passed via `scripts/run_experiment_*.sh`).
 - **A**: `ProbePoolSize=8` fixed; `ProbeRateMultiplier ∈ {4, 2√2, 2, √2, 1, 1/√2,
   0.5}`; 30 s measurement window, no warmup/drain.
-- **B**: `ProbeRateMultiplier=4.0` fixed; `ProbePoolSize ∈ {1, 2, 4, 8, 16, 24, 32}`;
+- **B**: `ProbeRateMultiplier=3.0` fixed; `ProbePoolSize ∈ {1, 2, 4, 8, 16, 24, 32}`;
   30 s measurement, 15 s warmup, 5 s drain.
 
 **Deviations from the Original Setup:**
 
+- **Docker Experiment B probe rate.** We intended to use a 4× probe rate on Docker,
+  matching the paper's default for the pool-size experiment. Those runs were
+  accidentally executed at 3× (the codebase default at the time; see
+  `results_b_50be.csv` / `results_b_100be.csv`). CloudLab Experiment B used 4× as
+  planned (`results_b_cloudlab_final.csv`). Both rates are well above the paper's 1×
+  degradation threshold, so we treat Docker B as qualitative pool-size evidence only;
+  CloudLab B is our paper-aligned run.
 - **Scale.** The paper evaluates production fleets with hundreds of replicas; our
   local hardware (12 cores) limits us to 10/50/100-backend fleets. Since
   `CPUsPerBackend=1.0` is fixed regardless of fleet size, 10/50/100 backends
@@ -181,13 +183,14 @@ Experiment-specific (Docker runs):
   "~1.5x allocation, worst case" only during occasional ceiling excursions, rather
   than as a permanent condition (an earlier, harsher calibration made *every* step
   collapse to 40–68% errors — see comments in `scripts/run_experiment_a.sh`).
-- **QRIF.** The paper's default `QRIF=0.70` (70th-percentile RIF threshold). Our
-  implementation uses `QRIF=0.84`, which classifies fewer backends as "hot" and
-  widens the cold-preferred set. A higher QRIF makes Prequal less selective: more
-  backends pass the cold filter, slightly reducing routing benefit but also preventing
-  excessive concentration on the few lowest-RIF backends. We chose 0.84 empirically
-  during calibration; the qualitative behavior (probe-rate sensitivity threshold,
-  pool-size curve shape) is unchanged.
+- **QRIF.** The paper's default `QRIF=0.70` (70th-percentile RIF threshold). Docker
+  runs used `QRIF=0.70` via the experiment scripts. CloudLab runs used `QRIF=0.84`,
+  which classifies fewer backends as "hot" and widens the cold-preferred set — a value
+  we chose empirically during calibration on dedicated hardware. A higher QRIF makes
+  Prequal less selective: more backends pass the cold filter, slightly reducing
+  routing benefit but also preventing excessive concentration on the few lowest-RIF
+  backends. The qualitative behavior (probe-rate sensitivity threshold, pool-size
+  curve shape) is unchanged across both values.
 
 
 ## 3.2 CloudLab Environment
@@ -220,7 +223,8 @@ without restarting, keeping backends warm across the entire run.
   Prequal/RR crossover near the 1x mark.
 - `ProbePoolSize=16` fixed for Experiment A; `ProbeRateMultiplier=4.0` fixed for
   Experiment B; pool sizes `{1,2,4,8,16,24,32,40,48}` for Experiment B.
-- `QRIF=0.84`, same antagonist walk parameters as Docker runs (5 states
+- `QRIF=0.84` (empirical choice on CloudLab; paper default is 0.70 — Docker runs
+  used 0.70). Same antagonist walk parameters as Docker runs (5 states
   `{20,35,50,65,80}%`, mean dwell 2000 ms, hot/neutral/cold-bias 0.50/0.425/0.30).
 - Each experiment repeated **3 independent runs**; tables below show the mean p99.
 
@@ -540,3 +544,6 @@ servers that were provided.
   average utilization — create the transient heterogeneity that Prequal is designed
   to exploit. The CloudLab deployment, free of Docker's CPU-oversubscription
   confound, produced the cleanest signal and most directly comparable results.
+
+
+
