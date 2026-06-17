@@ -12,7 +12,8 @@ Bartek Wydrowski, Robert Kleinberg, Stephen M. Rumble, Aaron Archer: Load is not
 
 
 **Project:**
-https://github.com/omarshaarawi/loadbalancer.git 
+https://github.com/cgarros33/loadbalancer
+(forked from https://github.com/omarshaarawi/loadbalancer)
 
 ---
 
@@ -187,10 +188,7 @@ Experiment-specific (Docker runs):
   excessive concentration on the few lowest-RIF backends. We chose 0.84 empirically
   during calibration; the qualitative behavior (probe-rate sensitivity threshold,
   pool-size curve shape) is unchanged.
-- **Probe pool eviction.** The paper's pool evicts the entry with the highest RIF
-  when the pool is full, keeping the pool biased toward the least-loaded known
-  servers. Our implementation matches this policy (`pkg/loadbalancer/balancer.go`,
-  `updatePool`).
+
 
 ## 3.2 CloudLab Environment
 
@@ -492,9 +490,11 @@ flat through P=32 and continued slow improvement beyond.
   probe rate above 1x, degrades below") is reproducible at a qualitative level even
   at 1–2 orders of magnitude smaller scale (10–100 backends vs. the paper's
   production fleets).
-- **Artifact**: no public code artifact was available. We reimplemented the load
-  balancer, HCL selection rule, probe pool, and a synthetic antagonist-load backend
-  from scratch in Go, based solely on the paper's prose description.
+- **Artifact**: we adapted the implementation of the load balancer presented by the 
+professors, greatly extending the implementation of the simulated Go backends, adding 
+better modeled synthetic antagonist loads, queueing and errors to the simulation. 
+Furthermore, we prepared the project to be compiled and run remotely in the Cloudlab 
+servers that were provided.
 - **Missing details**: the paper does not specify the exact workload-generation or
   contention-injection process used for Figure 8. We designed and calibrated our own
   5-state antagonist random walk to reproduce the paper's stated "~1.5x allocation,
